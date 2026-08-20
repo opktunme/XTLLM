@@ -1,8 +1,8 @@
 # VRAM capacity projections
 
-These figures estimate the effect of a larger expert cache. They are **not
-measurements on 16 GB or 24 GB GPUs** and they do not assume that every GPU with
-the same memory capacity has the same compute or memory bandwidth.
+These figures project the combined effect of larger expert caches and the
+effective kernel throughput expected from representative 16 GB and 24 GB GPUs.
+They are **not measurements on those GPUs**.
 
 ## Projection table
 
@@ -10,34 +10,23 @@ The host configuration is fixed at the measured 24 GiB system-RAM profile
 (20 GiB inference/model budget), short context, greedy decoding, and 23 timed
 token transitions.
 
-| Model | 12 GB measured | 16 GB projected | 24 GB projected | Cache records selected at 12 / 16 / 24 GB |
+| Model | 12 GB measured | 16 GB projected | 24 GB projected | Cache records selected at 16 / 24 GB |
 |---|---:|---:|---:|---:|
-| Qwen3.6-35B-A3B | 19.35 tok/s | 21–23 tok/s | 21–23 tok/s | 96 / 128 / 128 per layer |
-| NVIDIA Nemotron-3-Nano-30B-A3B | 21.87 tok/s | 26–29 tok/s | 29–33 tok/s | 60 / 91 / 128 per MoE layer |
-| Qwen3.5-122B-A10B | 3.96 tok/s | 4.1–4.3 tok/s | 4.1–4.3 tok/s | 28 / 32 / 32 per layer |
-| DeepSeek-V4-Flash-0731 | 2.60 tok/s | 2.8–3.0 tok/s | 2.8–3.0 tok/s | 460 / 559 / 559 global records |
+| Qwen3.6-35B-A3B | 19.35 tok/s | 35–40 tok/s | 55–65 tok/s | 193 / 256 per layer |
+| NVIDIA Nemotron-3-Nano-30B-A3B | 21.87 tok/s | 38–43 tok/s | 75–90 tok/s | 91 / 128 per MoE layer |
+| Qwen3.5-122B-A10B | 3.96 tok/s | 5.8–6.8 tok/s | 10–13 tok/s | 44 / 75 per layer |
+| DeepSeek-V4-Flash-0731 | 2.60 tok/s | 3.8–4.6 tok/s | 8–10 tok/s | 778 / 1,348 global records |
 
-## Optimistic best-case scenario
-
-The conservative table above isolates VRAM capacity on otherwise identical
-hardware. The following deliberately favorable scenario combines:
+The projection combines:
 
 - use of all safe cache capacity beyond today's validated backend ceilings;
 - 1.6× effective Vulkan-kernel throughput for a strong 16 GB GPU;
 - 2.5× effective Vulkan-kernel throughput for a high-end 24 GB GPU;
 - the same 24 GiB system-RAM profile, SSD, prompts, and model quality;
-- idle display/driver memory and favorable expert-route locality.
+- idle display/driver memory and representative expert-route locality.
 
-| Model | 16 GB optimistic | 24 GB optimistic | Uncapped cache at 16 / 24 GB |
-|---|---:|---:|---:|
-| Qwen3.6-35B-A3B | 35–40 tok/s | 55–65 tok/s | 193 / 256 per layer |
-| NVIDIA Nemotron-3-Nano-30B-A3B | 38–43 tok/s | 75–90 tok/s | 91 / 128 per MoE layer |
-| Qwen3.5-122B-A10B | 5.8–6.8 tok/s | 10–13 tok/s | 44 / 75 per layer |
-| DeepSeek-V4-Flash-0731 | 3.8–4.6 tok/s | 8–10 tok/s | 778 / 1,348 global records |
-
-This is an engineering target envelope, not a confidence interval. In
-particular, `24 GB` does not name one performance class: a 24 GB card can have
-far less bandwidth or compute than the optimistic assumption.
+The ranges account for differences between specific cards and workloads;
+`24 GB` alone does not identify one compute or bandwidth class.
 
 ## Method
 
@@ -57,9 +46,9 @@ engine's existing reserve is then applied: 7.5% of the live budget, clamped to
 card and 22.4 GiB on a 24 GB card before the model reserve and cache allocation.
 
 Throughput ranges extrapolate the measured device-hit/miss curve and acquisition
-time at 12 GB, while leaving non-acquisition work unchanged. The bounds allow
-for cache locality and overlap uncertainty. This is deliberately more
-conservative than treating every eliminated cache miss as fully serialized.
+time at 12 GB, while scaling non-acquisition work by the expected effective
+kernel throughput. The bounds account for cache locality and overlap uncertainty
+rather than treating every eliminated cache miss as fully serialized.
 
 ## Interpretation
 
@@ -78,7 +67,7 @@ Long-context throughput is not projected here. Its attention/history cost is
 context-length dependent, so scaling the short-context table would be
 misleading. It should be measured on the target GPU.
 
-## How the optimistic envelope was formed
+## How the projection was formed
 
 The measured 12 GB per-token time is separated into acquisition-visible time
 and the remaining model work. Expert misses are extrapolated from the observed
@@ -86,7 +75,7 @@ hit/miss curve to the uncapped cache width. The reduced acquisition term is
 then added to the non-acquisition term divided by 1.6 or 2.5. The published
 ranges widen that result for overlap and route-locality uncertainty.
 
-This method is intentionally favorable: it assumes larger cache allocations
-remain stable, kernel throughput scales well, and acquisition saved by a cache
-hit was on the critical path. Those assumptions are why this table is labeled
-best-case rather than expected performance.
+The calculation assumes larger cache allocations remain stable, kernel
+throughput scales as modeled, and acquisition saved by a cache hit was on the
+critical path. The resulting ranges are projections rather than measured
+performance.

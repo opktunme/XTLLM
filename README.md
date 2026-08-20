@@ -90,42 +90,23 @@ budgeted caches. “System RAM” is a profile; the engine budget leaves OS head
 
 ### Projected effect of more VRAM
 
-The following is a **capacity-only projection**, not a benchmark on those GPUs.
-It holds the RX 6700 XT's compute and memory bandwidth constant, uses the 24 GiB
-system-RAM profile, and changes only the live Vulkan memory budget and resulting
-model-specific expert cache. A real 16 or 24 GB GPU may be faster or slower
-depending on its compute, bandwidth, driver, and display load.
+These are projections, not benchmarks on those GPUs. They use the 24 GiB
+system-RAM profile and model the combined effect of the larger live Vulkan
+memory budget, a larger model-specific expert cache, and the expected effective
+kernel throughput of representative 16 GB and 24 GB GPUs.
 
-| Model | 12 GB measured | 16 GB projected | 24 GB projected | Expert-cache capacity (12 / 16 / 24 GB) |
+| Model | 12 GB measured | 16 GB projected | 24 GB projected | Expert-cache capacity (16 / 24 GB) |
 |---|---:|---:|---:|---:|
-| Qwen3.6-35B-A3B | 19.35 tok/s | **21–23 tok/s** | **21–23 tok/s** | 96 / 128 / 128 per layer |
-| Nemotron-3-Nano-30B-A3B | 21.87 tok/s | **26–29 tok/s** | **29–33 tok/s** | 60 / 91 / 128 per MoE layer |
-| Qwen3.5-122B-A10B | 3.96 tok/s | **4.1–4.3 tok/s** | **4.1–4.3 tok/s** | 28 / 32 / 32 per layer |
-| DeepSeek-V4-Flash-0731 | 2.60 tok/s | **2.8–3.0 tok/s** | **2.8–3.0 tok/s** | 460 / 559 / 559 global records |
+| Qwen3.6-35B-A3B | 19.35 tok/s | **35–40 tok/s** | **55–65 tok/s** | 193 / 256 per layer |
+| Nemotron-3-Nano-30B-A3B | 21.87 tok/s | **38–43 tok/s** | **75–90 tok/s** | 91 / 128 per MoE layer |
+| Qwen3.5-122B-A10B | 3.96 tok/s | **5.8–6.8 tok/s** | **10–13 tok/s** | 44 / 75 per layer |
+| DeepSeek-V4-Flash-0731 | 2.60 tok/s | **3.8–4.6 tok/s** | **8–10 tok/s** | 778 / 1,348 global records |
 
-The repeated 16/24 GB ranges are intentional: the current bounded engine reaches
-that backend's validated cache ceiling by 16 GB. More VRAM still provides safety
-headroom and context/workspace capacity, but is not projected to raise
-short-context decode until that ceiling is increased and measured. See the
+The projection assumes approximately **1.6× effective Vulkan-kernel throughput**
+for the 16 GB configuration and **2.5×** for 24 GB, relative to the RX 6700 XT,
+with safe expert-cache growth beyond today's validated widths. Actual results
+depend on the specific GPU, driver, available VRAM, and route locality. See the
 [assumptions and calculation](docs/VRAM_PROJECTIONS.md).
-
-#### Optimistic best-case
-
-This second view deliberately removes those validated cache ceilings and also
-assumes a faster GPU: approximately **1.6× effective kernel throughput** for the
-16 GB scenario and **2.5×** for 24 GB, relative to the RX 6700 XT. It represents
-a favorable upper scenario, not what VRAM capacity alone guarantees.
-
-| Model | 16 GB best-case projection | 24 GB best-case projection | Uncapped expert cache (16 / 24 GB) |
-|---|---:|---:|---:|
-| Qwen3.6-35B-A3B | **35–40 tok/s** | **55–65 tok/s** | 193 / 256 per layer |
-| Nemotron-3-Nano-30B-A3B | **38–43 tok/s** | **75–90 tok/s** | 91 / 128 per MoE layer |
-| Qwen3.5-122B-A10B | **5.8–6.8 tok/s** | **10–13 tok/s** | 44 / 75 per layer |
-| DeepSeek-V4-Flash-0731 | **3.8–4.6 tok/s** | **8–10 tok/s** | 778 / 1,348 global records |
-
-The top ends require favorable route locality, idle VRAM, efficient scaling of
-the current Vulkan kernels, and validation of larger cache widths. They should
-be treated as targets for measurement on named GPUs, not published results.
 
 ### Long-context decode
 

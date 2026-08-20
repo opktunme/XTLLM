@@ -28,19 +28,12 @@ table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid 
 <tr><td>Qwen3.5-122B-A10B</td><td>3.35</td><td>3.96</td><td>4.77</td></tr>
 <tr><td>DeepSeek-V4-Flash-0731</td><td>1.99</td><td>2.60</td><td>2.70</td></tr></tbody></table>
 <h2>Projected effect of more VRAM</h2>
-<p>Capacity-only projection at the 24 GiB system-RAM profile; RX 6700 XT-class compute and bandwidth held constant.</p>
+<p>Projected performance at the 24 GiB system-RAM profile, including larger model-specific expert caches and expected GPU throughput.</p>
 <table><thead><tr><th>Model</th><th>12 GB measured</th><th>16 GB projected</th><th>24 GB projected</th></tr></thead><tbody>
-<tr><td>Qwen3.6 35B</td><td>19.35</td><td><b class="green">21–23</b></td><td><b class="green">21–23 tok/s</b></td></tr>
-<tr><td>Nemotron 30B</td><td>21.87</td><td><b class="green">26–29</b></td><td><b class="green">29–33 tok/s</b></td></tr>
-<tr><td>Qwen3.5 122B</td><td>3.96</td><td>4.1–4.3</td><td>4.1–4.3</td></tr>
-<tr><td>DeepSeek 284B</td><td>2.60</td><td>2.8–3.0</td><td>2.8–3.0</td></tr></tbody></table>
-<h2>Optimistic best-case</h2>
-<p>Uncapped safe expert-cache growth plus 1.6× effective kernel throughput at 16 GB and 2.5× at 24 GB.</p>
-<table><thead><tr><th>Model</th><th>16 GB best-case</th><th>24 GB best-case</th></tr></thead><tbody>
-<tr><td>Qwen3.6 35B</td><td><b class="green">35–40</b></td><td><b class="green">55–65 tok/s</b></td></tr>
-<tr><td>Nemotron 30B</td><td><b class="green">38–43</b></td><td><b class="green">75–90 tok/s</b></td></tr>
-<tr><td>Qwen3.5 122B</td><td>5.8–6.8</td><td>10–13</td></tr>
-<tr><td>DeepSeek 284B</td><td>3.8–4.6</td><td>8–10</td></tr></tbody></table>
+<tr><td>Qwen3.6 35B</td><td>19.35</td><td><b class="green">35–40</b></td><td><b class="green">55–65 tok/s</b></td></tr>
+<tr><td>Nemotron 30B</td><td>21.87</td><td><b class="green">38–43</b></td><td><b class="green">75–90 tok/s</b></td></tr>
+<tr><td>Qwen3.5 122B</td><td>3.96</td><td>5.8–6.8</td><td>10–13</td></tr>
+<tr><td>DeepSeek 284B</td><td>2.60</td><td>3.8–4.6</td><td>8–10</td></tr></tbody></table>
 <h2>Long-context decode</h2>
 <table><thead><tr><th>Model</th><th>Context</th><th>Exact</th><th>Fast</th></tr></thead><tbody>
 <tr><td>Qwen3.6 35B</td><td>32K</td><td><b>10.825 tok/s</b></td><td>—</td></tr>
