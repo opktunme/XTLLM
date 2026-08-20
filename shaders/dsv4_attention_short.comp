@@ -1,0 +1,71 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Single-token MQA. indices enumerates the 128-token ring-window followed by all
+// compressed slots needed before position 2048. 0xffffffff entries are ignored.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QueryData { float values[]; } query;
+layout(set = 0, binding = 1, std430) readonly buffer KVCache { float values[]; } kv_cache;
+layout(set = 0, binding = 2, std430) readonly buffer SourceIndices { uint values[]; } indices;
+layout(set = 0, binding = 3, std430) readonly buffer AttentionSinks { float values[]; } sinks;
+layout(set = 0, binding = 4, std430) writeonly buffer ContextData { float values[]; } context;
+layout(set = 0, binding = 5, std430) readonly buffer Dummy { uint value; } dummy;
+layout(push_constant) uniform Params {
+    uint heads;
+    uint head_dim;
+    uint source_count;
+    uint index_offset;
+} params;
+
+const uint MAX_HEAD_DIM = 512u;
+const uint MAX_SOURCES = 640u;
+shared float scores[MAX_SOURCES];
+shared float denominator;
+
+void main() {
+    const uint head = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (head >= params.heads) return;
+    const uint head_dim = min(params.head_dim, MAX_HEAD_DIM);
+    const uint source_count = min(params.source_count, MAX_SOURCES);
+    const float scale = inversesqrt(float(head_dim));
+    for (uint source = 0u; source < source_count; ++source) {
+            const uint slot = indices.values[params.index_offset + source];
+            float dot_value = 0.0;
+            if (slot != 0xffffffffu) {
+                for (uint step = 0u; step < 8u; ++step) {
+                    const uint d = lane + step * 64u;
+                    if (d < head_dim) dot_value += query.values[head * head_dim + d] *
+                        kv_cache.values[slot * head_dim + d];
+                }
+                dot_value = subgroupAdd(dot_value);
+            }
+            if (lane == 0u) scores[source] = slot == 0xffffffffu ?
+                -3.402823466e+38 : dot_value * scale;
+    }
+    barrier();
+    if (lane == 0u) {
+        float maximum = sinks.values[head];
+        for (uint source = 0u; source < source_count; ++source)
+            maximum = max(maximum, scores[source]);
+        float sum = exp(sinks.values[head] - maximum);
+        for (uint source = 0u; source < source_count; ++source) {
+                scores[source] = exp(scores[source] - maximum);
+                sum += scores[source];
+        }
+        denominator = sum;
+    }
+    barrier();
+    for (uint step = 0u; step < 8u; ++step) {
+        const uint d = lane + step * 64u;
+        if (d < head_dim) {
+            float value = 0.0;
+            for (uint source = 0u; source < source_count; ++source) {
+                    const uint slot = indices.values[params.index_offset + source];
+                    if (slot != 0xffffffffu)
+                        value += scores[source] * kv_cache.values[slot * head_dim + d];
+            }
+            context.values[head * head_dim + d] = value / denominator;
+        }
+    }
+}

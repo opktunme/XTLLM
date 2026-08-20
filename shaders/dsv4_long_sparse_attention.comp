@@ -1,0 +1,39 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Eight wave64 heads share each KV load. Online softmax includes the learned sink.
+layout(local_size_x=64,local_size_y=8,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Query{float v[];} query;
+layout(set=0,binding=1,std430) readonly buffer WindowKV{float v[];} window_kv;
+layout(set=0,binding=2,std430) readonly buffer CompressedKV{uint v[];} compressed_kv;
+layout(set=0,binding=3,std430) readonly buffer Indices{uint v[];} indices;
+layout(set=0,binding=4,std430) readonly buffer Sinks{float v[];} sinks;
+layout(set=0,binding=5,std430) writeonly buffer Context{float v[];} context;
+layout(push_constant) uniform P{uint heads;uint source_count;uint window_slots;uint index_offset;} p;
+
+shared float kv_tile[512];
+float bf16(uint bits){return uintBitsToFloat(bits<<16u);}
+float compressed_value(uint slot,uint d){uint packed=compressed_kv.v[slot*256u+(d>>1u)];return bf16((d&1u)==0u?(packed&0xffffu):(packed>>16u));}
+
+void main(){
+    uint wave=gl_LocalInvocationID.y,lane=gl_LocalInvocationID.x;
+    uint head=gl_WorkGroupID.x*8u+wave;
+    if(head>=p.heads)return;
+    float maximum=sinks.v[head],denom=1.0;
+    float accumulator[8];for(uint s=0u;s<8u;++s)accumulator[s]=0.0;
+    float scale=inversesqrt(512.0);
+    for(uint source=0u;source<p.source_count;++source){
+        uint slot=indices.v[p.index_offset+source];
+        uint linear=wave*64u+lane;
+        if(linear<512u)kv_tile[linear]=slot<p.window_slots?window_kv.v[slot*512u+linear]:compressed_value(slot-p.window_slots,linear);
+        barrier();
+        float dotv=0.0;for(uint s=0u;s<8u;++s){uint d=lane+s*64u;dotv+=query.v[head*512u+d]*kv_tile[d];}
+        dotv=subgroupAdd(dotv)*scale;
+        float next_max=max(maximum,dotv),old_scale=exp(maximum-next_max),new_scale=exp(dotv-next_max);
+        denom=denom*old_scale+new_scale;
+        for(uint s=0u;s<8u;++s){uint d=lane+s*64u;accumulator[s]=accumulator[s]*old_scale+kv_tile[d]*new_scale;}
+        maximum=next_max;
+        barrier();
+    }
+    for(uint s=0u;s<8u;++s){uint d=lane+s*64u;context.v[head*512u+d]=accumulator[s]/denom;}
+}

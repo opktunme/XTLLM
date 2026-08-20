@@ -1,0 +1,28 @@
+#version 450
+
+layout(local_size_x=1,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer RouterLogits{float values[];} logits;
+layout(set=0,binding=1,std430) writeonly buffer RoutingResult{float values[];} result;
+layout(push_constant) uniform Params{uint dimension;uint experts;float jitter_epsilon;uint unused;}params;
+
+void main(){
+ uint first=0u;float first_max=-3.402823466e+38;
+ for(uint expert=0u;expert<params.experts;++expert)if(logits.values[expert]>first_max){first_max=logits.values[expert];first=expert;}
+ float first_denominator=0.0;
+ for(uint expert=0u;expert<params.experts;++expert){
+  const float factor=max(abs(logits.values[expert]),first_max);
+  const bool masked=((first_max-logits.values[expert])/factor)>(2.0*params.jitter_epsilon);
+  if(!masked)first_denominator+=exp(logits.values[expert]-first_max);
+ }
+ uint second=first==0u?1u:0u;float second_max=logits.values[second];
+ for(uint expert=0u;expert<params.experts;++expert)if(expert!=first&&logits.values[expert]>second_max){second_max=logits.values[expert];second=expert;}
+ float second_denominator=0.0;
+ for(uint expert=0u;expert<params.experts;++expert){
+  if(expert==first)continue;
+  const float factor=max(abs(logits.values[expert]),second_max);
+  const bool masked=((second_max-logits.values[expert])/factor)>(2.0*params.jitter_epsilon);
+  if(!masked)second_denominator+=exp(logits.values[expert]-second_max);
+ }
+ result.values[0]=float(first);result.values[1]=float(second);
+ result.values[2]=1.0/first_denominator;result.values[3]=1.0/second_denominator;
+}

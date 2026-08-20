@@ -1,0 +1,22 @@
+#version 450
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Packed{uint v[];} packed_data;
+layout(set=0,binding=1,std430) writeonly buffer Expanded{uint v[];} expanded_data;
+layout(push_constant) uniform P{uint first;uint count;uint position;uint incremental;} p;
+
+int fp4_integer(uint nibble){uint code=nibble&7u;int value;
+    if(code==0u)value=0;else if(code==1u)value=1;else if(code==2u)value=2;
+    else if(code==3u)value=3;else if(code==4u)value=4;else if(code==5u)value=6;
+    else if(code==6u)value=8;else value=12;return (nibble&8u)!=0u?-value:value;}
+
+void main(){
+    if(p.incremental!=0u&&(p.position+1u)%4u!=0u)return;
+    uint record=p.first+gl_WorkGroupID.x;if(gl_WorkGroupID.x>=p.count)return;
+    uint lane=gl_LocalInvocationID.x;if(lane<32u){uint source=packed_data.v[record*17u+lane/2u];
+        uint offset=(lane&1u)*16u,word=0u;
+        for(uint i=0u;i<4u;++i){uint nibble=(source>>(offset+i*4u))&15u;
+            word|=(uint(fp4_integer(nibble))&255u)<<(i*8u);}
+        expanded_data.v[record*33u+lane]=word;}
+    if(lane==32u)expanded_data.v[record*33u+32u]=packed_data.v[record*17u+16u];
+}

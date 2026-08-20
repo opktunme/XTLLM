@@ -1,0 +1,14 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer A{uint v[];}act;
+layout(set=0,binding=1,std430) readonly buffer W{uint v[];}weight;
+layout(set=0,binding=2,std430) readonly buffer S{uint v[];}scale;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];}outv;
+layout(push_constant) uniform P{uint rows;uint inner;uint activation_scale;uint output_offset;}p;
+const int FP4X2[16]=int[16](0,1,2,3,4,6,8,12,0,-1,-2,-3,-4,-6,-8,-12);
+uint d4(uint n){return (uint(FP4X2[n&15])&255u)|((uint(FP4X2[(n>>4)&15])&255u)<<8)|((uint(FP4X2[(n>>8)&15])&255u)<<16)|((uint(FP4X2[(n>>12)&15])&255u)<<24);}
+int dot8(uint w,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(d4(w&65535u)))+dotPacked4x8EXT(int(a1),int(d4(w>>16)));}
+float bf(uint i){uint q=scale.v[i>>1];return uintBitsToFloat(((q>>((i&1u)*16u))&65535u)<<16u);}
+void main(){uint l=gl_LocalInvocationID.x,f=l&1u,lg=l>>1u,first=gl_WorkGroupID.x*8u,G=p.inner/64u;float sum[8]=float[8](0,0,0,0,0,0,0,0);for(uint g=lg;g<G;g+=32u){uint w0=f*4u;float as=uintBitsToFloat(act.v[p.activation_scale+(g>>1u)]);for(uint j=0;j<4u;j++){uint w=w0+j,ai=g*16u+w*2u;for(uint r=0;r<8u;r++){uint row=first+r;if(row<p.rows){uint wi=row*(G*8u)+w*G+g;int z=dot8(weight.v[wi],act.v[ai],act.v[ai+1]);sum[r]+=float(z)*0.5*as*bf(row*(G*4u)+g*4u+(w>>1u));}}}}for(uint r=0;r<8u;r++)sum[r]=subgroupAdd(sum[r]);if(l==0)for(uint r=0;r<8u;r++){uint row=first+r;if(row<p.rows)outv.v[p.output_offset+row]=sum[r];}}

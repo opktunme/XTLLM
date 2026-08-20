@@ -1,0 +1,78 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// RDNA2 occupancy experiment: four output rows per wave instead of eight.
+// The native E2M1 representation and arithmetic are identical to the retained
+// path; only the bounded work decomposition and accumulator footprint differ.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer ExpertRecord { uint values[]; } expert_data;
+layout(set = 0, binding = 2, std430) readonly buffer RoutingData { uint values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Intermediate { float values[]; } intermediate;
+layout(push_constant) uniform Params {
+    uint rank;
+    uint activation_scale_u32;
+    uint swiglu_limit_bits;
+    uint unused;
+} params;
+
+const uint MODEL_DIM = 4096u;
+const uint EXPERT_DIM = 2048u;
+const uint BLOCKS = 128u;
+const uint WORDS_PER_ROW = 512u;
+const uint W1_WEIGHT_U32 = 0u;
+const uint W1_SCALE_BYTE = 4194304u;
+const uint W3_WEIGHT_U32 = 1114112u;
+const uint W3_SCALE_BYTE = 8650752u;
+const int FP4_X2[16] = int[16](0,1,2,3,4,6,8,12,0,-1,-2,-3,-4,-6,-8,-12);
+
+uint load_scale_byte(uint byte_offset) {
+    return (expert_data.values[byte_offset >> 2u] >> ((byte_offset & 3u) * 8u)) & 0xffu;
+}
+float ue8m0(uint code) { return uintBitsToFloat(code << 23u); }
+uint pack4_fp4_x2(uint packed, uint nibble_base) {
+    return (uint(FP4_X2[(packed >> (nibble_base + 0u)) & 15u]) & 255u) |
+        ((uint(FP4_X2[(packed >> (nibble_base + 4u)) & 15u]) & 255u) << 8u) |
+        ((uint(FP4_X2[(packed >> (nibble_base + 8u)) & 15u]) & 255u) << 16u) |
+        ((uint(FP4_X2[(packed >> (nibble_base + 12u)) & 15u]) & 255u) << 24u);
+}
+int block_dot(uint weight_base, uint row, uint block) {
+    const uint wb = weight_base + row * WORDS_PER_ROW + block * 4u;
+    const uint ab = block * 8u;
+    int sum = 0;
+    for (uint i = 0u; i < 4u; ++i) {
+        const uint w = expert_data.values[wb + i];
+        sum += dotPacked4x8EXT(int(activations.values[ab + i * 2u]), int(pack4_fp4_x2(w, 0u)));
+        sum += dotPacked4x8EXT(int(activations.values[ab + i * 2u + 1u]), int(pack4_fp4_x2(w, 16u)));
+    }
+    return sum;
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint first_row = gl_WorkGroupID.x * 4u;
+    float gate[4] = float[4](0.0,0.0,0.0,0.0);
+    float up[4] = float[4](0.0,0.0,0.0,0.0);
+    for (uint step = 0u; step < 2u; ++step) {
+        const uint block = lane + step * 64u;
+        const float as = uintBitsToFloat(activations.values[params.activation_scale_u32 + block]);
+        for (uint r = 0u; r < 4u; ++r) {
+            const uint row = first_row + r;
+            const float gs = ue8m0(load_scale_byte(W1_SCALE_BYTE + row * BLOCKS + block));
+            const float us = ue8m0(load_scale_byte(W3_SCALE_BYTE + row * BLOCKS + block));
+            gate[r] += float(block_dot(W1_WEIGHT_U32, row, block)) * (0.5 * as * gs);
+            up[r] += float(block_dot(W3_WEIGHT_U32, row, block)) * (0.5 * as * us);
+        }
+    }
+    for (uint r = 0u; r < 4u; ++r) { gate[r] = subgroupAdd(gate[r]); up[r] = subgroupAdd(up[r]); }
+    if (lane == 0u) {
+        const float limit = uintBitsToFloat(params.swiglu_limit_bits);
+        for (uint r = 0u; r < 4u; ++r) {
+            const uint row = first_row + r;
+            const float g = min(gate[r], limit);
+            const float u = clamp(up[r], -limit, limit);
+            intermediate.values[params.rank * EXPERT_DIM + row] = (g / (1.0 + exp(-g))) * u;
+        }
+    }
+}

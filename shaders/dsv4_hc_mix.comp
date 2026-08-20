@@ -1,0 +1,47 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// mixes = linear(flatten(hc_state), hc_fn) * rsqrt(mean(state^2) + eps).
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer HCState { float values[]; } state;
+layout(set = 0, binding = 1, std430) readonly buffer HCFunction { float values[]; } fn;
+layout(set = 0, binding = 2, std430) writeonly buffer MixOutput { float values[]; } mixes;
+layout(set = 0, binding = 3, std430) readonly buffer Dummy { uint value; } dummy;
+layout(push_constant) uniform Params {
+    uint dimension;
+    uint hc;
+    uint mix_count;
+    uint epsilon_bits;
+} params;
+
+const uint MAX_FLAT_STEPS = 256u; // hc=4, dimension=4096
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint token = gl_WorkGroupID.y;
+    const uint first_mix = gl_WorkGroupID.x * 4u;
+    const uint total = min(params.dimension * params.hc, 16384u);
+    const uint state_base = token * total;
+    const uint mix_base = token * params.mix_count;
+    float square_sum = 0.0;
+    float dots[4] = float[4](0.0,0.0,0.0,0.0);
+    for (uint step = 0u; step < MAX_FLAT_STEPS; ++step) {
+        const uint index = lane + step * 64u;
+        if (index < total) {
+            const float x = state.values[state_base + index];
+            square_sum += x * x;
+            for (uint r = 0u; r < 4u; ++r) {
+                const uint mix = first_mix + r;
+                if (mix < params.mix_count) dots[r] += x * fn.values[mix * total + index];
+            }
+        }
+    }
+    square_sum = subgroupAdd(square_sum);
+    const float inv_rms = inversesqrt(square_sum / float(total) +
+                                      uintBitsToFloat(params.epsilon_bits));
+    for (uint r = 0u; r < 4u; ++r) dots[r] = subgroupAdd(dots[r]);
+    if (lane == 0u) for (uint r = 0u; r < 4u; ++r) {
+        const uint mix = first_mix + r;
+        if (mix < params.mix_count) mixes.values[mix_base + mix] = dots[r] * inv_rms;
+    }
+}

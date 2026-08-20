@@ -1,0 +1,30 @@
+# Changelog
+
+## Unreleased
+
+- Renamed the public project, executable, launcher, package, and documentation
+  to **XTLLM** (eXpert-Tier LLM); legacy launcher names remain compatibility aliases.
+- Documented the validated RX 6700 XT and expected-compatible RDNA2, RDNA3,
+  and RDNA4 families, clearly marked as pending hardware validation.
+- Added the `xtllm` launcher for official, revision-pinned model download,
+  resumable one-time conversion, native generation, planning, and localhost chat.
+- Added a self-contained Windows release package, dependency bootstrap script,
+  release checksums, and tag-driven GitHub release workflow.
+- Simplified the Windows quick start to three launcher commands while keeping
+  all inference in the existing model-specific Vulkan backends.
+- Added capacity-only 16 GB and 24 GB VRAM throughput projections for all four
+  supported backends, including projected model-specific cache selections and
+  explicit uncertainty/measurement boundaries.
+- Added a separately labeled optimistic scenario combining uncapped safe cache
+  sizing with 1.6×/2.5× effective GPU-kernel throughput assumptions.
+
+## 0.1.0 — 2026-08-16
+
+- Packaged the experimental long-context engine that became XTLLM.
+- Added BF16 host-K/V and exact chunked attention for Qwen3.6 and Nemotron.
+- Preserved model-specific Qwen 122B, DeepSeek 284B, Qwen 35B, and Nemotron
+  expert-cache/runtime paths behind one auto-detecting executable.
+- Added automatic live Vulkan VRAM sizing, explicit RAM/context budgets, and
+  bounded OOM retry inherited from the original engine.
+- Added Windows build, benchmark methodology, Linux portability status, and
+  repository governance files.

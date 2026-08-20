@@ -1,0 +1,15 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) buffer QueryGate { float v[]; } query_gate;
+layout(set=0,binding=1,std430) buffer Key { float v[]; } key;
+layout(set=0,binding=2,std430) readonly buffer QGamma { float v[]; } qgamma;
+layout(set=0,binding=3,std430) readonly buffer KGamma { float v[]; } kgamma;
+layout(set=0,binding=4,std430) buffer KVCache { float v[]; } cache;
+layout(set=0,binding=5,std430) readonly buffer Rope { float v[]; } rope;
+layout(push_constant) uniform P { uint layer; uint position; uint heads; uint rope_pairs; } p;
+const uint HEAD_DIM=256u,KV_HEADS=2u,MAX_CONTEXT=2048u;
+void main(){uint lane=gl_LocalInvocationID.x,head=gl_WorkGroupID.x;if(head<p.heads){float ss=0.0;for(uint s=0u;s<4u;++s){uint d=lane+s*64u;float x=query_gate.v[head*512u+d];ss+=x*x;}ss=subgroupAdd(ss);float inv=inversesqrt(ss/256.0+1e-6);for(uint s=0u;s<4u;++s){uint d=lane+s*64u;query_gate.v[head*512u+d]*=inv*(qgamma.v[d]+1.0);}}
+if(head<KV_HEADS){float ss=0.0;for(uint s=0u;s<4u;++s){uint d=lane+s*64u;float x=key.v[head*HEAD_DIM+d];ss+=x*x;}ss=subgroupAdd(ss);float inv=inversesqrt(ss/256.0+1e-6);for(uint s=0u;s<4u;++s){uint d=lane+s*64u;key.v[head*HEAD_DIM+d]*=inv*(kgamma.v[d]+1.0);}}
+barrier();if(head<p.heads&&lane<p.rope_pairs){uint base=head*512u;float a=query_gate.v[base+lane],b=query_gate.v[base+p.rope_pairs+lane],c=rope.v[p.position*64u+lane],s=rope.v[p.position*64u+32u+lane];query_gate.v[base+lane]=a*c-b*s;query_gate.v[base+p.rope_pairs+lane]=b*c+a*s;}
+if(head<KV_HEADS){if(lane<p.rope_pairs){uint base=head*HEAD_DIM;float a=key.v[base+lane],b=key.v[base+p.rope_pairs+lane],c=rope.v[p.position*64u+lane],s=rope.v[p.position*64u+32u+lane];key.v[base+lane]=a*c-b*s;key.v[base+p.rope_pairs+lane]=b*c+a*s;}barrier();uint lb=p.layer*2u*MAX_CONTEXT*KV_HEADS*HEAD_DIM;for(uint s=0u;s<4u;++s){uint d=lane+s*64u;cache.v[lb+(p.position*KV_HEADS+head)*HEAD_DIM+d]=key.v[head*HEAD_DIM+d];}}}

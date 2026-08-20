@@ -1,0 +1,52 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Activations {
+    float values[];
+} activations;
+
+// Symmetric signed INT8 weights, packed four per uint32, row-major by output channel.
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights {
+    uint values[];
+} weights;
+
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales {
+    float values[];
+} scales;
+
+layout(set = 0, binding = 3, std430) writeonly buffer Output {
+    float values[];
+} output_data;
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint columns;
+    uint inner;
+    uint packed_stride;
+} params;
+
+void main() {
+    const uint column = gl_GlobalInvocationID.x;
+    const uint row = gl_GlobalInvocationID.y;
+    if (row >= params.rows || column >= params.columns) {
+        return;
+    }
+
+    const float scale = scales.values[column];
+    const uint weight_base = column * params.packed_stride;
+    const uint activation_base = row * params.inner;
+    float sum = 0.0;
+
+    for (uint k = 0; k < params.inner; ++k) {
+        const uint packed = weights.values[weight_base + (k >> 2u)];
+        const uint byte_value = (packed >> ((k & 3u) * 8u)) & 0xffu;
+        int quantized = int(byte_value);
+        if (quantized >= 128) {
+            quantized -= 256;
+        }
+        sum += activations.values[activation_base + k] * (float(quantized) * scale);
+    }
+
+    output_data.values[row * params.columns + column] = sum;
+}

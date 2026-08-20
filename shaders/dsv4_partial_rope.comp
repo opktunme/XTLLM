@@ -1,0 +1,41 @@
+#version 450
+
+// DeepSeek V4 rotates only the final rope_dim values of each head, using adjacent
+// complex pairs. position_flags bit31 requests inverse rotation.
+// Input and output must not alias within one dispatch.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer RopeCos { float values[]; } rope_cos;
+layout(set = 0, binding = 2, std430) readonly buffer RopeSin { float values[]; } rope_sin;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint vectors;
+    uint head_dim;
+    uint rope_dim;
+    uint position_flags;
+} params;
+
+void main() {
+    const uint linear = gl_GlobalInvocationID.x;
+    const uint total = params.vectors * params.head_dim;
+    if (linear >= total) return;
+    const uint offset = linear % params.head_dim;
+    const uint rope_begin = params.head_dim - min(params.rope_dim, params.head_dim);
+    const float x = input_data.values[linear];
+    if (offset < rope_begin) {
+        output_data.values[linear] = x;
+        return;
+    }
+    const uint rope_offset = offset - rope_begin;
+    const uint pair_offset = rope_offset ^ 1u;
+    const uint vector_base = linear - offset;
+    const uint position = params.position_flags & 0x7fffffffu;
+    const uint frequency = rope_offset >> 1u;
+    const uint rope_index = position * (params.rope_dim >> 1u) + frequency;
+    const float c = rope_cos.values[rope_index];
+    float s = rope_sin.values[rope_index];
+    if ((params.position_flags & 0x80000000u) != 0u) s = -s;
+    const float paired = input_data.values[vector_base + rope_begin + pair_offset];
+    output_data.values[linear] = (rope_offset & 1u) == 0u ? x * c - paired * s
+                                                          : x * c + paired * s;
+}

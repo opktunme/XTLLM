@@ -1,0 +1,35 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer QuantizedData { uint values[]; } output_data;
+layout(set = 0, binding = 2, std430) readonly buffer DummyA { uint value; } dummy_a;
+layout(set = 0, binding = 3, std430) readonly buffer DummyB { uint value; } dummy_b;
+layout(push_constant) uniform Params { uint count; uint ranks; uint unused0; uint unused1; } params;
+
+uint byte_value(int value) { return uint(value) & 255u; }
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint rank = gl_LocalInvocationID.y;
+    if (rank >= params.ranks) return;
+    const uint packed_count = params.count / 4u;
+    float maximum = 0.0;
+    for (uint index = lane; index < params.count; index += 64u)
+        maximum = max(maximum, abs(input_data.values[rank * params.count + index]));
+    maximum = subgroupMax(maximum);
+    const float scale = maximum > 0.0 ? maximum / 127.0 : 1.0;
+    const uint output_base = rank * (packed_count + 1u);
+    if (lane == 0u) output_data.values[output_base + packed_count] = floatBitsToUint(scale);
+    for (uint word = lane; word < packed_count; word += 64u) {
+        const uint input_base = rank * params.count + word * 4u;
+        const ivec4 q = ivec4(clamp(round(vec4(
+            input_data.values[input_base], input_data.values[input_base + 1u],
+            input_data.values[input_base + 2u], input_data.values[input_base + 3u]) / scale),
+            vec4(-127.0), vec4(127.0)));
+        output_data.values[output_base + word] = byte_value(q.x) |
+            (byte_value(q.y) << 8u) | (byte_value(q.z) << 16u) |
+            (byte_value(q.w) << 24u);
+    }
+}

@@ -1,0 +1,45 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } scales;
+layout(set = 0, binding = 3, std430) buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { float signed_weight; uint columns; uint inner; uint packed_stride; } params;
+
+const uint Q2_OFFSET = 1024u;
+const uint SCALE1_OFFSET = 2048u;
+const uint SCALE2_OFFSET = 2112u;
+const uint GROUP_PACKED = 64u;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint first_row = gl_WorkGroupID.x * 8u;
+    float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (uint packed_index = lane; packed_index < params.packed_stride; packed_index += 64u) {
+        const uint group = packed_index / GROUP_PACKED;
+        const float scale1 = uintBitsToFloat(activations.values[SCALE1_OFFSET + group]);
+        const float scale2 = uintBitsToFloat(activations.values[SCALE2_OFFSET + group]);
+        const int q1 = int(activations.values[packed_index]);
+        const int q2 = int(activations.values[Q2_OFFSET + packed_index]);
+        for (uint item = 0u; item < 8u; ++item) {
+            const uint row = first_row + item;
+            if (row < params.columns) {
+                const int w = int(weights.values[row * params.packed_stride + packed_index]);
+                sums[item] += float(dotPacked4x8EXT(q1, w)) * scale1 +
+                              float(dotPacked4x8EXT(q2, w)) * scale2;
+            }
+        }
+    }
+    for (uint item = 0u; item < 8u; ++item) sums[item] = subgroupAdd(sums[item]);
+    if (lane == 0u) for (uint item = 0u; item < 8u; ++item) {
+        const uint row = first_row + item;
+        if (row < params.columns) {
+            const float value = sums[item] * scales.values[row] * abs(params.signed_weight);
+            output_data.values[row] = params.signed_weight < 0.0 ? value
+                                                                 : output_data.values[row] + value;
+        }
+    }
+}

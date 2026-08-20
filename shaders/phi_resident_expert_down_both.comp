@@ -1,0 +1,49 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer ExpertBlock { uint values[]; } experts;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint unused0; uint unused1; uint unused2; uint unused3; } params;
+
+const uint HIDDEN = 448u, GATE_ROWS = 896u, GATE_STRIDE = 1024u;
+const uint DOWN_ROWS = 4096u, DOWN_STRIDE = 112u;
+const uint DOWN_BASE = GATE_ROWS + GATE_ROWS * GATE_STRIDE;
+const uint EXPERT_WORDS = DOWN_BASE + DOWN_ROWS + DOWN_ROWS * DOWN_STRIDE;
+
+int signed_byte(uint packed, uint byte_index) { return bitfieldExtract(int(packed), int(byte_index * 8u), 8); }
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    const uint expert0 = uint(round(routing.values[0])) * EXPERT_WORDS;
+    const uint expert1 = uint(round(routing.values[1])) * EXPERT_WORDS;
+    float a0 = 0.0, a1 = 0.0, a2 = 0.0, a3 = 0.0;
+    float b0 = 0.0, b1 = 0.0, b2 = 0.0, b3 = 0.0;
+    if (row < DOWN_ROWS) {
+        const uint base0 = expert0 + DOWN_BASE + DOWN_ROWS + row * DOWN_STRIDE;
+        const uint base1 = expert1 + DOWN_BASE + DOWN_ROWS + row * DOWN_STRIDE;
+        for (uint packed_index = lane; packed_index < DOWN_STRIDE; packed_index += 64u) {
+            const uint wa = experts.values[base0 + packed_index];
+            const uint wb = experts.values[base1 + packed_index];
+            const uint k = packed_index * 4u;
+            a0 += activations.values[k] * float(signed_byte(wa, 0u));
+            a1 += activations.values[k + 1u] * float(signed_byte(wa, 1u));
+            a2 += activations.values[k + 2u] * float(signed_byte(wa, 2u));
+            a3 += activations.values[k + 3u] * float(signed_byte(wa, 3u));
+            b0 += activations.values[HIDDEN + k] * float(signed_byte(wb, 0u));
+            b1 += activations.values[HIDDEN + k + 1u] * float(signed_byte(wb, 1u));
+            b2 += activations.values[HIDDEN + k + 2u] * float(signed_byte(wb, 2u));
+            b3 += activations.values[HIDDEN + k + 3u] * float(signed_byte(wb, 3u));
+        }
+    }
+    const float sum0 = subgroupAdd((a0 + a1) + (a2 + a3));
+    const float sum1 = subgroupAdd((b0 + b1) + (b2 + b3));
+    if (lane == 0u && row < DOWN_ROWS) {
+        output_data.values[row] =
+            sum0 * uintBitsToFloat(experts.values[expert0 + DOWN_BASE + row]) * routing.values[2] +
+            sum1 * uintBitsToFloat(experts.values[expert1 + DOWN_BASE + row]) * routing.values[3];
+    }
+}

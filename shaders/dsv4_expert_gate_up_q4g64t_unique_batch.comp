@@ -1,0 +1,52 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// One dispatch owns one unique expert and every verifier position/rank that
+// selected it.  Workgroup Y selects an occurrence; the expert record is common
+// to the whole dispatch so adjacent positions reuse its packed Q4 cache lines.
+layout(local_size_x=64,local_size_y=4,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer A{uint v[];} a;
+layout(set=0,binding=1,std430) readonly buffer E{uint v[];} e;
+layout(set=0,binding=2,std430) readonly buffer R{uint v[];} route;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];} out_data;
+layout(set=0,binding=4,std430) readonly buffer M{uint v[];} occurrences;
+layout(push_constant) uniform P{
+    uint unique_index;
+    uint activation_scale_u32;
+    uint limit_bits;
+    uint occurrence_count;
+} p;
+
+const uint DIM=4096u,EDIM=2048u,TOPK=6u,GROUPS=64u,WORDS=8u;
+const uint ITEM_WORDS=1152u,OCCURRENCE_STRIDE=5u;
+const uint W1_WEIGHT=0u,W1_SCALE_BYTE=4194304u;
+const uint W3_WEIGHT=1114112u,W3_SCALE_BYTE=8650752u;
+
+uint sn(uint n){uint b=(n|(n<<8u))&0x00ff00ffu;b=(b|(b<<4u))&0x0f0f0f0fu;return b|((b&0x08080808u)*31u);}
+int dq(uint w,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sn(w&65535u)))+dotPacked4x8EXT(int(a1),int(sn(w>>16u)));}
+float bf(uint byte_offset,uint index){uint x=e.v[(byte_offset>>2u)+(index>>1u)];uint h=(x>>((index&1u)*16u))&65535u;return uintBitsToFloat(h<<16u);}
+int dotrow(uint wb,uint row,uint group,uint frag,uint abase){uint wi=frag*4u,base=wb+row*(GROUPS*WORDS)+wi*GROUPS+group,ab=abase+group*16u+wi*2u;return dq(e.v[base],a.v[ab],a.v[ab+1u])+dq(e.v[base+GROUPS],a.v[ab+2u],a.v[ab+3u])+dq(e.v[base+2u*GROUPS],a.v[ab+4u],a.v[ab+5u])+dq(e.v[base+3u*GROUPS],a.v[ab+6u],a.v[ab+7u]);}
+
+void main(){
+    uint occurrence=gl_WorkGroupID.y;
+    if(occurrence>=p.occurrence_count)return;
+    uint item=occurrences.v[p.unique_index*OCCURRENCE_STRIDE+occurrence];
+    uint token=item&255u,rank=(item>>8u)&255u;
+    uint lane=gl_LocalInvocationID.x,frag=lane&1u,lg=lane>>1u;
+    uint row=gl_WorkGroupID.x*4u+gl_LocalInvocationID.y;
+    uint abase=token*ITEM_WORDS;
+    float gate=0.0,up=0.0;
+    if(row<EDIM){
+        for(uint group=lg;group<GROUPS;group+=32u){
+            float as=uintBitsToFloat(a.v[abase+p.activation_scale_u32+group*2u+frag]);
+            gate+=float(dotrow(W1_WEIGHT,row,group,frag,abase))*as*bf(W1_SCALE_BYTE,row*GROUPS+group);
+            up+=float(dotrow(W3_WEIGHT,row,group,frag,abase))*as*bf(W3_SCALE_BYTE,row*GROUPS+group);
+        }
+        gate=subgroupAdd(gate);up=subgroupAdd(up);
+        if(lane==0u){
+            float limit=uintBitsToFloat(p.limit_bits),g=min(gate,limit),u=clamp(up,-limit,limit);
+            out_data.v[(token*TOPK+rank)*EDIM+row]=(g/(1.0+exp(-g)))*u;
+        }
+    }
+}

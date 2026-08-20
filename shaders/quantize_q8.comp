@@ -1,0 +1,41 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer QuantizedData { uint values[]; } quantized;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint group_size;
+    uint unused0;
+    uint unused1;
+} params;
+
+const uint MAX_PACKED = 1024u;
+
+uint signed_byte(int value) { return uint(value) & 0xffu; }
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint groups = (params.count + params.group_size - 1u) / params.group_size;
+    for (uint group = lane; group < groups; group += 64u) {
+        const uint begin = group * params.group_size;
+        const uint end = min(begin + params.group_size, params.count);
+        float maximum = 0.0;
+        for (uint index = begin; index < end; ++index) {
+            maximum = max(maximum, abs(input_data.values[index]));
+        }
+        const float scale = maximum > 0.0 ? maximum / 127.0 : 1.0;
+        quantized.values[MAX_PACKED + group] = floatBitsToUint(scale);
+        for (uint index = begin; index < end; index += 4u) {
+            ivec4 q = ivec4(0);
+            q.x = int(round(clamp(input_data.values[index] / scale, -127.0, 127.0)));
+            if (index + 1u < end) q.y = int(round(clamp(input_data.values[index + 1u] / scale, -127.0, 127.0)));
+            if (index + 2u < end) q.z = int(round(clamp(input_data.values[index + 2u] / scale, -127.0, 127.0)));
+            if (index + 3u < end) q.w = int(round(clamp(input_data.values[index + 3u] / scale, -127.0, 127.0)));
+            quantized.values[index >> 2u] = signed_byte(q.x) |
+                (signed_byte(q.y) << 8u) | (signed_byte(q.z) << 16u) |
+                (signed_byte(q.w) << 24u);
+        }
+    }
+}

@@ -1,0 +1,42 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer PackedWeightScales { uint values[]; } weight_scales;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(push_constant) uniform Params { uint rows; uint inner; uint activation_scale_u32; uint batch; } params;
+
+uint signed_nibbles(uint n) {
+    uint b=(n&0x000fu)|((n&0x00f0u)<<4u)|((n&0x0f00u)<<8u)|((n&0xf000u)<<12u);
+    uint s=b&0x08080808u; return b|(s<<1u)|(s<<2u)|(s<<3u)|(s<<4u);
+}
+int dot_q4x8(uint p,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(signed_nibbles(p&0xffffu)))+dotPacked4x8EXT(int(a1),int(signed_nibbles(p>>16u)));}
+float bf16(uint i){uint p=weight_scales.values[i>>1u];return uintBitsToFloat(((p>>((i&1u)*16u))&0xffffu)<<16u);}
+
+void main(){
+    const uint lane=gl_LocalInvocationID.x, token=gl_WorkGroupID.y;
+    if(token>=params.batch)return;
+    const uint fragment=lane&1u, lane_group=lane>>1u, first_row=gl_WorkGroupID.x*8u;
+    const uint packed_stride=(params.inner+3u)>>2u, scale_stride=(params.inner+127u)>>7u;
+    const uint q4_groups=(params.inner+63u)>>6u, words_per_row=q4_groups*8u;
+    const uint act_base=token*packed_stride, act_scale=params.activation_scale_u32+token*scale_stride;
+    float sums[8]=float[8](0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0);
+    for(uint group=lane_group;group<q4_groups;group+=32u){
+        uint wig=fragment*4u, aw=group*16u+wig*2u;
+        uint a0=activations.values[act_base+aw],a1=activations.values[act_base+aw+1u];
+        uint a2=activations.values[act_base+aw+2u],a3=activations.values[act_base+aw+3u];
+        uint a4=activations.values[act_base+aw+4u],a5=activations.values[act_base+aw+5u];
+        uint a6=activations.values[act_base+aw+6u],a7=activations.values[act_base+aw+7u];
+        float as=uintBitsToFloat(activations.values[act_scale+(group>>1u)]);
+        for(uint r=0u;r<8u;++r){uint row=first_row+r;if(row<params.rows){
+            uint b=row*words_per_row+wig*q4_groups+group;
+            int d=dot_q4x8(weights.values[b],a0,a1)+dot_q4x8(weights.values[b+q4_groups],a2,a3)+dot_q4x8(weights.values[b+2u*q4_groups],a4,a5)+dot_q4x8(weights.values[b+3u*q4_groups],a6,a7);
+            sums[r]+=float(d)*as*bf16(row*q4_groups+group);
+        }}
+    }
+    for(uint r=0u;r<8u;++r)sums[r]=subgroupAdd(sums[r]);
+    if(lane==0u)for(uint r=0u;r<8u;++r){uint row=first_row+r;if(row<params.rows)output_data.values[token*params.rows+row]=sums[r];}
+}

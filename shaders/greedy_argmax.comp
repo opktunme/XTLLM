@@ -1,0 +1,28 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Logits { float values[]; } logits;
+layout(set = 0, binding = 1, std430) buffer NextToken { uint value; } next_token;
+layout(set = 0, binding = 2, std430) writeonly buffer TokenHistory { uint values[]; } history;
+layout(set = 0, binding = 3, std430) readonly buffer Dummy { uint value; } dummy;
+layout(push_constant) uniform Params { uint count; uint position; uint unused0; uint unused1; } params;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    float best = -3.402823466e+38;
+    uint index = 0u;
+    for (uint item = lane; item < params.count; item += 64u) {
+        const float candidate = logits.values[item];
+        if (candidate > best) {
+            best = candidate;
+            index = item;
+        }
+    }
+    const float maximum = subgroupMax(best);
+    const uint winner = subgroupMin(best == maximum ? index : 0xffffffffu);
+    if (lane == 0u) {
+        next_token.value = winner;
+        history.values[params.position] = winner;
+    }
+}

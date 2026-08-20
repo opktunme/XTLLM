@@ -1,0 +1,19 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Scores{float v[];} scores;
+layout(set=0,binding=1,std430) readonly buffer Positions{uint v[];} positions;
+layout(set=0,binding=2,std430) writeonly buffer Indices{uint v[];} indices;
+layout(set=0,binding=3,std430) readonly buffer DummyA{uint v;} a;
+layout(set=0,binding=4,std430) readonly buffer DummyB{uint v;} b;
+layout(set=0,binding=5,std430) readonly buffer DummyC{uint v;} c;
+layout(push_constant) uniform P{uint count;uint top_k;uint output_offset;uint value_offset;} p;
+shared uint prefix,rank_value,threshold_key,position_prefix,position_rank,position_threshold,above_count;
+uint ordered(float x){uint u=floatBitsToUint(x);return u^((u&0x80000000u)!=0u?0xffffffffu:0x80000000u);}
+void main(){uint lane=gl_LocalInvocationID.x;if(lane==0u){prefix=0u;rank_value=min(p.top_k,p.count);}barrier();for(int bit=31;bit>=0;--bit){uint ones=0u,mask=bit==31?0u:(0xffffffffu<<uint(bit+1));for(uint i=lane;i<p.count;i+=64u){uint key=ordered(scores.v[i]);if((key&mask)==prefix&&((key>>uint(bit))&1u)!=0u)++ones;}ones=subgroupAdd(ones);if(lane==0u){if(ones>=rank_value)prefix|=1u<<uint(bit);else rank_value-=ones;}barrier();}
+    uint above=0u;for(uint i=lane;i<p.count;i+=64u)if(positions.v[i]!=0xffffffffu&&ordered(scores.v[i])>prefix)++above;above=subgroupAdd(above);
+    if(lane==0u){threshold_key=prefix;above_count=above;position_prefix=0u;position_rank=min(p.top_k,p.count)-min(above,p.top_k);}barrier();
+    // Candidate blocks are score-ordered, not position-ordered. Resolve score
+    // ties by the same ascending absolute-position rule as the exact scanner.
+    for(int bit=31;bit>=0;--bit){uint zeros=0u,mask=bit==31?0u:(0xffffffffu<<uint(bit+1));for(uint i=lane;i<p.count;i+=64u){uint pos=positions.v[i];if(pos!=0xffffffffu&&ordered(scores.v[i])==threshold_key&&(pos&mask)==position_prefix&&((pos>>uint(bit))&1u)==0u)++zeros;}zeros=subgroupAdd(zeros);if(lane==0u){if(zeros<position_rank){position_prefix|=1u<<uint(bit);position_rank-=zeros;}}barrier();}
+    if(lane==0u){position_threshold=position_prefix;uint emitted=0u;for(uint i=0u;i<p.count&&emitted<p.top_k;++i)if(positions.v[i]!=0xffffffffu&&ordered(scores.v[i])>threshold_key)indices.v[p.output_offset+emitted++]=p.value_offset+positions.v[i];for(uint i=0u;i<p.count&&emitted<p.top_k;++i)if(positions.v[i]<position_threshold&&ordered(scores.v[i])==threshold_key)indices.v[p.output_offset+emitted++]=p.value_offset+positions.v[i];if(emitted<p.top_k)for(uint i=0u;i<p.count;++i)if(positions.v[i]==position_threshold&&ordered(scores.v[i])==threshold_key){indices.v[p.output_offset+emitted++]=p.value_offset+position_threshold;break;}while(emitted<p.top_k)indices.v[p.output_offset+emitted++]=0xffffffffu;}}

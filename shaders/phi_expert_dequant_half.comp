@@ -1,0 +1,50 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer ExpertBlock { uint values[]; } source;
+layout(set = 0, binding = 1, std430) writeonly buffer HalfExpertBlock { uint values[]; } target;
+layout(push_constant) uniform Params { uint unused0; uint unused1; uint unused2; uint unused3; } params;
+
+const uint EXPERTS = 16u;
+const uint HIDDEN = 448u, DIMENSION = 4096u;
+const uint GATE_ROWS = 896u, GATE_STRIDE = 1024u;
+const uint DOWN_ROWS = 4096u, DOWN_STRIDE = 112u;
+const uint GATE_WEIGHT_WORDS = GATE_ROWS * GATE_STRIDE;
+const uint DOWN_BASE = GATE_ROWS + GATE_WEIGHT_WORDS;
+const uint EXPERT_SOURCE_WORDS = DOWN_BASE + DOWN_ROWS + DOWN_ROWS * DOWN_STRIDE;
+const uint GATE_HALF_WORDS = GATE_ROWS * DIMENSION / 2u;
+const uint DOWN_HALF_WORDS = DOWN_ROWS * HIDDEN / 2u;
+const uint EXPERT_HALF_WORDS = GATE_HALF_WORDS + DOWN_HALF_WORDS;
+
+int signed_byte(uint packed, uint byte_index) {
+    return bitfieldExtract(int(packed), int(byte_index * 8u), 8);
+}
+
+void main() {
+    const uint group = gl_WorkGroupID.y * 65535u + gl_WorkGroupID.x;
+    const uint index = group * 256u + gl_LocalInvocationID.x;
+    if (index >= EXPERTS * EXPERT_HALF_WORDS) return;
+    const uint expert = index / EXPERT_HALF_WORDS;
+    const uint local = index - expert * EXPERT_HALF_WORDS;
+    const uint source_base = expert * EXPERT_SOURCE_WORDS;
+    int first, second;
+    float scale;
+    if (local < GATE_HALF_WORDS) {
+        const uint element = local * 2u;
+        const uint row = element / DIMENSION;
+        const uint packed = source.values[source_base + GATE_ROWS + element / 4u];
+        const uint byte_index = element & 3u;
+        first = signed_byte(packed, byte_index);
+        second = signed_byte(packed, byte_index + 1u);
+        scale = uintBitsToFloat(source.values[source_base + row]);
+    } else {
+        const uint element = (local - GATE_HALF_WORDS) * 2u;
+        const uint row = element / HIDDEN;
+        const uint packed = source.values[source_base + DOWN_BASE + DOWN_ROWS + element / 4u];
+        const uint byte_index = element & 3u;
+        first = signed_byte(packed, byte_index);
+        second = signed_byte(packed, byte_index + 1u);
+        scale = uintBitsToFloat(source.values[source_base + DOWN_BASE + row]);
+    }
+    target.values[index] = packHalf2x16(vec2(float(first) * scale, float(second) * scale));
+}

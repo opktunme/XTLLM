@@ -1,0 +1,9 @@
+#version 450
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer L{float v[];}logits;
+layout(set=0,binding=1,std430) readonly buffer T{uint v[];}table;
+layout(set=0,binding=2,std430) readonly buffer Id{uint v[];}tokens;
+layout(set=0,binding=3,std430) writeonly buffer R{uint v[];}routing;
+layout(push_constant) uniform P{uint experts;uint top_k;uint route_scale_bits;uint batch;}p;
+shared float raw[256];float score(float x){float z=max(x,0.0)+log(1.0+exp(-abs(x)));return sqrt(max(z,0.0));}
+void main(){uint lane=gl_LocalInvocationID.x,t=gl_WorkGroupID.x;if(t>=p.batch)return;for(uint s=0u;s<4u;++s){uint e=lane+s*64u;if(e<p.experts)raw[e]=score(logits.v[t*p.experts+e]);}barrier();if(lane==0u){uint token=tokens.v[t],base=t*64u;float den=0.0,w[6];for(uint r=0u;r<6u;++r){uint e=table.v[token*p.top_k+r];routing.v[base+r]=e;w[r]=raw[e];den+=w[r];}float scale=uintBitsToFloat(p.route_scale_bits);for(uint r=0u;r<6u;++r)routing.v[base+6u+r]=floatBitsToUint(den>0.0?w[r]/den*scale:0.0);}}

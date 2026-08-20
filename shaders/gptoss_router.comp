@@ -1,0 +1,56 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { vec4 values[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer RouterWeight { vec4 values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer RouterBias { float values[]; } bias;
+layout(set = 0, binding = 3, std430) writeonly buffer Routing { float values[]; } routing;
+layout(push_constant) uniform Params { uint dimension; uint experts; uint top_k; uint unused; } params;
+
+shared float logits[128];
+
+float router_row(uint expert) {
+    float sum = 0.0;
+    const uint stride = params.dimension / 4u;
+    for (uint column = 0u; column < stride; ++column) {
+        sum += dot(input_data.values[column], weights.values[expert * stride + column]);
+    }
+    return sum + bias.values[expert];
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    logits[lane] = router_row(lane);
+    logits[lane + 64u] = router_row(lane + 64u);
+    barrier();
+    if (lane == 0u) {
+        uint selected[4];
+        float selected_logits[4];
+        for (uint rank = 0u; rank < 4u; ++rank) {
+            float best = -3.402823466e+38;
+            uint best_index = 0u;
+            for (uint expert = 0u; expert < 128u; ++expert) {
+                bool used = false;
+                for (uint prior = 0u; prior < rank; ++prior) used = used || selected[prior] == expert;
+                if (!used && logits[expert] > best) {
+                    best = logits[expert];
+                    best_index = expert;
+                }
+            }
+            selected[rank] = best_index;
+            selected_logits[rank] = best;
+        }
+        const float maximum = max(max(selected_logits[0], selected_logits[1]),
+                                  max(selected_logits[2], selected_logits[3]));
+        float denominator = 0.0;
+        for (uint rank = 0u; rank < 4u; ++rank) {
+            selected_logits[rank] = exp(selected_logits[rank] - maximum);
+            denominator += selected_logits[rank];
+        }
+        for (uint rank = 0u; rank < 4u; ++rank) {
+            routing.values[rank] = float(selected[rank]);
+            routing.values[4u + rank] = selected_logits[rank] / denominator;
+        }
+    }
+}

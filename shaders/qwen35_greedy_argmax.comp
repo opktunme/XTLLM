@@ -1,0 +1,10 @@
+#version 450
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Logits { float values[]; } logits;
+layout(set=0,binding=1,std430) buffer NextToken { uint value; } next_token;
+layout(set=0,binding=2,std430) buffer Workspace { uint values[]; } workspace;
+layout(set=0,binding=3,std430) readonly buffer Dummy { uint value; } dummy;
+layout(push_constant) uniform P { uint count; uint groups; uint phase; uint unused; } p;
+const uint MAX_VOCAB=248320u,MAX_GROUPS=256u;
+shared float best_values[64];shared uint best_indices[64];
+void main(){uint lane=gl_LocalInvocationID.x;float best=-3.402823466e+38;uint best_index=0u;if(p.phase==0u){uint count=min(p.count,MAX_VOCAB),groups=min(p.groups,MAX_GROUPS);for(uint step=0u;step<16u;++step){uint index=gl_WorkGroupID.x*64u+lane+step*groups*64u;if(index<count){float value=logits.values[index];if(value>best||(value==best&&index<best_index)){best=value;best_index=index;}}}}else{for(uint step=0u;step<4u;++step){uint index=lane+step*64u;if(index<min(p.groups,MAX_GROUPS)){float value=uintBitsToFloat(workspace.values[index*2u]);uint candidate=workspace.values[index*2u+1u];if(value>best||(value==best&&candidate<best_index)){best=value;best_index=candidate;}}}}best_values[lane]=best;best_indices[lane]=best_index;barrier();for(uint stride=32u;stride>0u;stride>>=1u){if(lane<stride){float value=best_values[lane+stride];uint index=best_indices[lane+stride];if(value>best_values[lane]||(value==best_values[lane]&&index<best_indices[lane])){best_values[lane]=value;best_indices[lane]=index;}}barrier();}if(lane==0u){if(p.phase==0u){uint base=gl_WorkGroupID.x*2u;workspace.values[base]=floatBitsToUint(best_values[0]);workspace.values[base+1u]=best_indices[0];}else next_token.value=best_indices[0];}}

@@ -1,0 +1,27 @@
+#version 450
+
+// Converter layout: row-major signed-I8 embedding and one F32 scale per token row.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer PackedEmbedding { uint values[]; } weights;
+layout(set = 0, binding = 1, std430) readonly buffer RowScales { float values[]; } scales;
+layout(set = 0, binding = 2, std430) readonly buffer TokenData { uint value; } token_data;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint vocab_size;
+    uint dimension;
+    uint row_stride_u32;
+    uint output_offset;
+} params;
+
+void main() {
+    const uint column = gl_GlobalInvocationID.x;
+    if (column >= params.dimension) return;
+    const uint token = token_data.value;
+    if (token >= params.vocab_size) {
+        output_data.values[params.output_offset + column] = 0.0;
+        return;
+    }
+    const uint packed = weights.values[token * params.row_stride_u32 + (column >> 2u)];
+    const int q = bitfieldExtract(int(packed), int((column & 3u) * 8u), 8);
+    output_data.values[params.output_offset + column] = float(q) * scales.values[token];
+}

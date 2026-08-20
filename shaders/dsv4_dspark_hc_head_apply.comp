@@ -1,0 +1,14 @@
+#version 450
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer X{float v[];}state;
+layout(set=0,binding=1,std430) readonly buffer M{float v[];}mixes;
+layout(set=0,binding=2,std430) readonly buffer Pm{float v[];}params;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];}output_data;
+layout(push_constant) uniform P{uint dimension;uint hc;uint epsilon_bits;uint unused;}p;
+void main(){
+    uint col=gl_GlobalInvocationID.x,t=gl_WorkGroupID.y;if(col>=p.dimension)return;
+    uint total=p.dimension*p.hc,base=t*total;float value=0.0,eps=uintBitsToFloat(p.epsilon_bits);
+    for(uint h=0u;h<p.hc;++h){float pre=1.0/(1.0+exp(-(mixes.v[t*p.hc+h]*params.v[0]+params.v[1u+h])))+eps;value+=pre*state.v[base+h*p.dimension+col];}
+    output_data.v[t*p.dimension+col]=value;
+}

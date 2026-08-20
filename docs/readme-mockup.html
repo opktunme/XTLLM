@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XTLLM — README mockup</title>
+<style>
+:root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--muted:#8b949e;--blue:#58a6ff;--green:#3fb950}
+*{box-sizing:border-box}body{margin:0;background:#010409;color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.top{height:64px;border-bottom:1px solid #21262d;background:#010409;display:flex;align-items:center;padding:0 28px;gap:18px}.mark{font-size:28px}.repo{font-weight:600}.slash{color:var(--muted)}
+.layout{display:grid;grid-template-columns:minmax(0,900px) 290px;gap:28px;max-width:1260px;margin:32px auto;padding:0 24px}.card{background:var(--bg);border:1px solid var(--line);border-radius:8px}.readme{padding:36px 42px}.hero{width:100%;border-radius:14px;border:1px solid #243150}.badges{display:flex;justify-content:center;gap:7px;margin:18px}.badge{font-size:12px;padding:3px 8px;border-radius:5px;background:#1f6feb;color:white}.badge.p{background:#6e40c9}.badge.g{background:#238636}
+h1,h2{border-bottom:1px solid #21262d;padding-bottom:.3em}h1{font-size:2em}h2{margin-top:32px}a{color:var(--blue)}code{background:#161b22;border-radius:5px;padding:2px 5px}blockquote{border-left:4px solid #3b434b;margin:20px 0;padding:7px 16px;color:var(--muted)}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid var(--line);padding:8px 10px;text-align:left}th{background:var(--panel)}.arch{padding:18px;border:1px solid var(--line);border-radius:8px;background:var(--panel);text-align:center;color:#bfdbfe}.arrow{color:#7d8590;margin:0 7px}
+.side{padding:20px;height:max-content}.side h3{margin:0 0 14px}.tag{display:inline-block;border:1px solid #1f6feb;color:#79c0ff;border-radius:12px;padding:2px 8px;margin:2px;font-size:12px}.stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;border-top:1px solid var(--line);margin-top:18px;padding-top:18px}.num{font-size:20px;font-weight:650}.small{color:var(--muted);font-size:12px}.green{color:var(--green)}
+@media(max-width:900px){.layout{grid-template-columns:1fr}.readme{padding:24px}.side{display:none}}
+</style></head><body>
+<header class="top"><span class="mark">◉</span><span class="repo">opktunme <span class="slash">/</span> XTLLM</span><span class="badge g">Public</span></header>
+<main class="layout"><article class="card readme">
+<img class="hero" src="assets/hero.svg" alt="XTLLM">
+<div class="badges"><span class="badge">Windows 10/11</span><span class="badge p">Vulkan 1.3</span><span class="badge">C++17</span><span class="badge g">Apache-2.0</span></div>
+<p>XTLLM (eXpert-Tier LLM) is an experimental, text-only Vulkan inference engine for running very large mixture-of-experts models on consumer AMD GPUs. It keeps a model-specific working set in VRAM, a budgeted expert tier in system RAM, and the cold remainder on NVMe.</p>
+<blockquote><b>Status:</b> Windows/RDNA2 research preview. Greedy text generation is working. Model weights are not included.</blockquote>
+<h2>Why this exists</h2>
+<div class="arch"><b>NVMe cold experts</b><span class="arrow">→</span><b>Budgeted RAM</b><span class="arrow">→</span><b>VRAM cache</b><span class="arrow">→</span><b>Finite Vulkan kernels</b><br><span class="small">BF16 host K/V supplies bounded long-context attention</span></div>
+<ul><li>One executable auto-detects four model families.</li><li>Live Vulkan memory-budget sizing selects a safe, model-specific cache.</li><li>Authoritative routing; no Q3, expert dropping, or TDR changes.</li></ul>
+<h2>Measured performance</h2>
+<p>RX 6700 XT 12GB, Ryzen 5 3600, NVMe, Windows 10, greedy decode.</p>
+<table><thead><tr><th>Model</th><th>16 GiB</th><th>24 GiB</th><th>64 GiB</th></tr></thead><tbody>
+<tr><td>Qwen3.6-35B-A3B</td><td>16.33</td><td><b class="green">19.35 tok/s</b></td><td>19.64</td></tr>
+<tr><td>Nemotron-3-Nano-30B-A3B</td><td>14.53</td><td><b class="green">21.87 tok/s</b></td><td>22.08</td></tr>
+<tr><td>Qwen3.5-122B-A10B</td><td>3.35</td><td>3.96</td><td>4.77</td></tr>
+<tr><td>DeepSeek-V4-Flash-0731</td><td>1.99</td><td>2.60</td><td>2.70</td></tr></tbody></table>
+<h2>Projected effect of more VRAM</h2>
+<p>Capacity-only projection at the 24 GiB system-RAM profile; RX 6700 XT-class compute and bandwidth held constant.</p>
+<table><thead><tr><th>Model</th><th>12 GB measured</th><th>16 GB projected</th><th>24 GB projected</th></tr></thead><tbody>
+<tr><td>Qwen3.6 35B</td><td>19.35</td><td><b class="green">21–23</b></td><td><b class="green">21–23 tok/s</b></td></tr>
+<tr><td>Nemotron 30B</td><td>21.87</td><td><b class="green">26–29</b></td><td><b class="green">29–33 tok/s</b></td></tr>
+<tr><td>Qwen3.5 122B</td><td>3.96</td><td>4.1–4.3</td><td>4.1–4.3</td></tr>
+<tr><td>DeepSeek 284B</td><td>2.60</td><td>2.8–3.0</td><td>2.8–3.0</td></tr></tbody></table>
+<h2>Optimistic best-case</h2>
+<p>Uncapped safe expert-cache growth plus 1.6× effective kernel throughput at 16 GB and 2.5× at 24 GB.</p>
+<table><thead><tr><th>Model</th><th>16 GB best-case</th><th>24 GB best-case</th></tr></thead><tbody>
+<tr><td>Qwen3.6 35B</td><td><b class="green">35–40</b></td><td><b class="green">55–65 tok/s</b></td></tr>
+<tr><td>Nemotron 30B</td><td><b class="green">38–43</b></td><td><b class="green">75–90 tok/s</b></td></tr>
+<tr><td>Qwen3.5 122B</td><td>5.8–6.8</td><td>10–13</td></tr>
+<tr><td>DeepSeek 284B</td><td>3.8–4.6</td><td>8–10</td></tr></tbody></table>
+<h2>Long-context decode</h2>
+<table><thead><tr><th>Model</th><th>Context</th><th>Exact</th><th>Fast</th></tr></thead><tbody>
+<tr><td>Qwen3.6 35B</td><td>32K</td><td><b>10.825 tok/s</b></td><td>—</td></tr>
+<tr><td>Nemotron 30B</td><td>64K</td><td><b>6.556 tok/s</b></td><td>—</td></tr>
+<tr><td>Qwen3.5 122B</td><td>256K</td><td>1.924</td><td>3.396</td></tr>
+<tr><td>DeepSeek 284B</td><td>~1M</td><td>0.977</td><td>2.023</td></tr></tbody></table>
+<h2>Quick start — Windows</h2>
+<pre><code>git clone https://github.com/opktunme/XTLLM.git xtllm
+cd xtllm
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+
+.\xtllm.cmd setup qwen36 --model-root D:\XTLLM-Models
+.\xtllm.cmd chat qwen36</code></pre>
+<h2>Safety boundaries</h2><p>Finite submissions and I/O waits; no GPU busy-spin, unbounded shaders, hidden RAM tier, Q3 shortcut, router changes, or Windows TDR modifications.</p>
+</article>
+<aside class="card side"><h3>About</h3><p class="small">Huge MoE models. Consumer AMD GPUs. Honest memory budgets.</p><p><a href="#">Readme</a><br><a href="#">Apache-2.0 license</a><br><a href="#">Contributing</a></p><div><span class="tag">vulkan</span><span class="tag">amd-gpu</span><span class="tag">moe</span><span class="tag">llm-inference</span><span class="tag">long-context</span></div><div class="stats"><div><div class="num">4</div><div class="small">backends</div></div><div><div class="num">129</div><div class="small">shaders</div></div><div><div class="num">Q4</div><div class="small">quality</div></div><div><div class="num">1M</div><div class="small">tested context</div></div></div></aside>
+</main></body></html>

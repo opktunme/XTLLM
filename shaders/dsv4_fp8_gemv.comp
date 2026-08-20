@@ -1,0 +1,60 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Native/reference checkpoint path: E4M3FN A[K], E4M3FN B[N,K], UE8M0
+// activation scales per K128 and weight scales [ceil(N/128),ceil(K/128)].
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer PackedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer PackedWeightScales { uint values[]; } weight_scales;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint rows;
+    uint inner;
+    uint activation_scale_u32;
+    uint weight_scale_byte;
+} params;
+
+const uint WORDS_PER_GROUP = 32u;
+const uint MAX_WORD_STEPS = 128u;
+
+float e4m3fn(uint code) {
+    const uint exponent = (code >> 3u) & 15u;
+    const uint mantissa = code & 7u;
+    float value;
+    if (exponent == 0u) value = float(mantissa) * (1.0 / 512.0);
+    else if (exponent == 15u && mantissa == 7u) value = 0.0;
+    else value = (1.0 + float(mantissa) * 0.125) * exp2(float(int(exponent) - 7));
+    return (code & 0x80u) != 0u ? -value : value;
+}
+float ue8m0(uint code) { return uintBitsToFloat(code << 23u); }
+uint load_scale_byte(uint byte_offset) {
+    return (weight_scales.values[byte_offset >> 2u] >> ((byte_offset & 3u) * 8u)) & 0xffu;
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x;
+    if (row >= params.rows) return;
+    const uint packed_stride = (params.inner + 3u) >> 2u;
+    const uint blocks = (params.inner + 127u) >> 7u;
+    float sum = 0.0;
+    for (uint step = 0u; step < MAX_WORD_STEPS; ++step) {
+        const uint word = lane + step * 64u;
+        if (word < packed_stride) {
+            const uint group = word / WORDS_PER_GROUP;
+            const float as = ue8m0(activations.values[params.activation_scale_u32 + group] & 0xffu);
+            const uint ws_index = (row >> 7u) * blocks + group;
+            const float ws = ue8m0(load_scale_byte(params.weight_scale_byte + ws_index));
+            const uint a = activations.values[word];
+            const uint w = weights.values[row * packed_stride + word];
+            for (uint j = 0u; j < 4u; ++j) {
+                const uint k = word * 4u + j;
+                if (k < params.inner) sum += e4m3fn((a >> (j * 8u)) & 0xffu) *
+                                               e4m3fn((w >> (j * 8u)) & 0xffu) * as * ws;
+            }
+        }
+    }
+    sum = subgroupAdd(sum);
+    if (lane == 0u) output_data.values[row] = sum;
+}

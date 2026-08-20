@@ -1,0 +1,45 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Converter layout: signed-I8 weights [rows, inner], F32 scale[rows].
+// Activations are dsv4_quantize_q8 output with group_size=128.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } weight_scales;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint rows;
+    uint inner;
+    uint activation_scale_u32;
+    uint output_offset;
+} params;
+
+const uint WORDS_PER_GROUP = 32u;
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint first_row = gl_WorkGroupID.x * 8u;
+    const uint packed_stride = (params.inner + 3u) >> 2u;
+    float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (uint word = lane; word < packed_stride; word += 64u) {
+            const int a = int(activations.values[word]);
+            const float as = uintBitsToFloat(
+                activations.values[params.activation_scale_u32 + word / WORDS_PER_GROUP]);
+            for (uint r = 0u; r < 8u; ++r) {
+                const uint row = first_row + r;
+                if (row < params.rows) {
+                    sums[r] += float(dotPacked4x8EXT(a,
+                        int(weights.values[row * packed_stride + word]))) * as;
+                }
+            }
+    }
+    for (uint r = 0u; r < 8u; ++r) sums[r] = subgroupAdd(sums[r]);
+    if (lane == 0u) {
+        for (uint r = 0u; r < 8u; ++r) {
+            const uint row = first_row + r;
+            if (row < params.rows)
+                output_data.values[params.output_offset + row] = sums[r] * weight_scales.values[row];
+        }
+    }
+}

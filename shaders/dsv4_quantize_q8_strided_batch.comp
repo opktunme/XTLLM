@@ -1,0 +1,49 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Batch verifier expert quantization.  One Y item is one token activation or
+// one token/rank intermediate.  Packed bytes and K-group scales stay adjacent
+// in each item's existing descriptor-compatible stride, but all items execute
+// in one bounded dispatch.
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer I{float v[];} input_data;
+layout(set=0,binding=1,std430) writeonly buffer O{uint v[];} output_data;
+layout(push_constant) uniform P{
+    uint count;
+    uint group_size;
+    uint packed_words;
+    uint scale_u32;
+} p;
+
+uint byte_of(int value){return uint(value)&255u;}
+
+void main(){
+    const uint lane=gl_LocalInvocationID.x;
+    const uint group=gl_WorkGroupID.x;
+    const uint item=gl_WorkGroupID.y;
+    const uint groups=(p.count+p.group_size-1u)/p.group_size;
+    if(group>=groups||p.group_size==0u||p.group_size>128u)return;
+    const uint begin=group*p.group_size;
+    const uint end=min(begin+p.group_size,p.count);
+    const uint input_base=item*p.count;
+    const uint output_base=item*(p.scale_u32+groups);
+    float maximum=0.0;
+    for(uint step=0u;step<2u;++step){
+        const uint index=begin+lane+step*64u;
+        if(index<end)maximum=max(maximum,abs(input_data.v[input_base+index]));
+    }
+    maximum=subgroupMax(maximum);
+    const float scale=maximum>0.0?maximum/127.0:1.0;
+    if(lane==0u)output_data.v[output_base+p.scale_u32+group]=floatBitsToUint(scale);
+    const uint words=(end-begin+3u)>>2u;
+    if(lane<words){
+        const uint index=begin+lane*4u;
+        ivec4 q=ivec4(0);
+        if(index<end)q.x=int(round(clamp(input_data.v[input_base+index]/scale,-127.0,127.0)));
+        if(index+1u<end)q.y=int(round(clamp(input_data.v[input_base+index+1u]/scale,-127.0,127.0)));
+        if(index+2u<end)q.z=int(round(clamp(input_data.v[input_base+index+2u]/scale,-127.0,127.0)));
+        if(index+3u<end)q.w=int(round(clamp(input_data.v[input_base+index+3u]/scale,-127.0,127.0)));
+        const uint word=(begin>>2u)+lane;
+        if(word<p.packed_words)output_data.v[output_base+word]=byte_of(q.x)|(byte_of(q.y)<<8u)|(byte_of(q.z)<<16u)|(byte_of(q.w)<<24u);
+    }
+}

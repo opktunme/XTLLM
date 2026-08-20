@@ -1,0 +1,73 @@
+#version 450
+
+// Per-token output record: pre[hc], post[hc], comb[hc*hc].
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer MixInput { float values[]; } mixes;
+layout(set = 0, binding = 1, std430) readonly buffer HCScales { float values[]; } scales;
+layout(set = 0, binding = 2, std430) readonly buffer HCBases { float values[]; } bases;
+layout(set = 0, binding = 3, std430) writeonly buffer SplitOutput { float values[]; } split;
+layout(push_constant) uniform Params {
+    uint tokens;
+    uint hc;
+    uint iterations;
+    uint epsilon_bits;
+} params;
+
+const uint HC = 4u;
+const uint RECORD = 24u;
+const uint MAX_ITERS = 20u;
+
+void main() {
+    const uint token = gl_WorkGroupID.x;
+    if (token >= params.tokens || gl_LocalInvocationID.x != 0u) return;
+    const uint hc = min(params.hc, HC);
+    const float eps = uintBitsToFloat(params.epsilon_bits);
+    const uint in_base = token * RECORD;
+    const uint out_base = token * RECORD;
+    for (uint j = 0u; j < HC; ++j) {
+        if (j < hc) {
+            split.values[out_base + j] =
+                1.0 / (1.0 + exp(-(mixes.values[in_base + j] * scales.values[0] + bases.values[j]))) + eps;
+            split.values[out_base + HC + j] =
+                2.0 / (1.0 + exp(-(mixes.values[in_base + HC + j] * scales.values[1] + bases.values[HC + j])));
+        }
+    }
+    float comb[16];
+    for (uint row = 0u; row < HC; ++row) {
+        float row_max = -3.402823466e+38;
+        for (uint col = 0u; col < HC; ++col) {
+            const uint i = row * HC + col;
+            comb[i] = mixes.values[in_base + 2u * HC + i] * scales.values[2] + bases.values[2u * HC + i];
+            row_max = max(row_max, comb[i]);
+        }
+        float row_sum = 0.0;
+        for (uint col = 0u; col < HC; ++col) {
+            const uint i = row * HC + col;
+            comb[i] = exp(comb[i] - row_max);
+            row_sum += comb[i];
+        }
+        for (uint col = 0u; col < HC; ++col) comb[row * HC + col] = comb[row * HC + col] / row_sum + eps;
+    }
+    float col_sum[4];
+    for (uint col = 0u; col < HC; ++col) {
+        col_sum[col] = 0.0;
+        for (uint row = 0u; row < HC; ++row) col_sum[col] += comb[row * HC + col];
+        for (uint row = 0u; row < HC; ++row) comb[row * HC + col] /= col_sum[col] + eps;
+    }
+    const uint iterations = min(params.iterations, MAX_ITERS);
+    for (uint iteration = 1u; iteration < MAX_ITERS; ++iteration) {
+        if (iteration < iterations) {
+            for (uint row = 0u; row < HC; ++row) {
+                float row_sum = 0.0;
+                for (uint col = 0u; col < HC; ++col) row_sum += comb[row * HC + col];
+                for (uint col = 0u; col < HC; ++col) comb[row * HC + col] /= row_sum + eps;
+            }
+            for (uint col = 0u; col < HC; ++col) {
+                float sum = 0.0;
+                for (uint row = 0u; row < HC; ++row) sum += comb[row * HC + col];
+                for (uint row = 0u; row < HC; ++row) comb[row * HC + col] /= sum + eps;
+            }
+        }
+    }
+    for (uint i = 0u; i < 16u; ++i) split.values[out_base + 2u * HC + i] = comb[i];
+}

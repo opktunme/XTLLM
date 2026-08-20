@@ -1,0 +1,55 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { vec4 values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer ExpertBlock { uint values[]; } experts;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint unused0; uint unused1; uint unused2; uint unused3; } params;
+
+const uint HIDDEN = 448u;
+const uint GATE_ROWS = 896u;
+const uint GATE_STRIDE = 512u;
+const uint DOWN_ROWS = 4096u;
+const uint DOWN_STRIDE = 56u;
+const uint DOWN_BASE = GATE_ROWS + GATE_ROWS * GATE_STRIDE;
+const uint EXPERT_WORDS = DOWN_BASE + DOWN_ROWS + DOWN_ROWS * DOWN_STRIDE;
+
+uint signed_nibbles(uint n) {
+    uint b = (n & 0x000fu) | ((n & 0x00f0u) << 4u) |
+             ((n & 0x0f00u) << 8u) | ((n & 0xf000u) << 12u);
+    const uint s = b & 0x08080808u;
+    return b | (s << 1u) | (s << 2u) | (s << 3u) | (s << 4u);
+}
+
+float dot_q4(uint packed, uint activation) {
+    return dot(activations.values[activation],
+               unpackSnorm4x8(signed_nibbles(packed & 0xffffu))) +
+           dot(activations.values[activation + 1u],
+               unpackSnorm4x8(signed_nibbles(packed >> 16u)));
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    const uint e0 = uint(round(routing.values[0])) * EXPERT_WORDS;
+    const uint e1 = uint(round(routing.values[1])) * EXPERT_WORDS;
+    float sum0 = 0.0, sum1 = 0.0;
+    if (row < DOWN_ROWS) {
+        const uint base0 = e0 + DOWN_BASE + DOWN_ROWS + row * DOWN_STRIDE;
+        const uint base1 = e1 + DOWN_BASE + DOWN_ROWS + row * DOWN_STRIDE;
+        for (uint v = lane; v < DOWN_STRIDE; v += 64u) {
+            const uint p = v * 2u;
+            sum0 += dot_q4(experts.values[base0 + v], p);
+            sum1 += dot_q4(experts.values[base1 + v], HIDDEN / 4u + p);
+        }
+    }
+    sum0 = subgroupAdd(sum0);
+    sum1 = subgroupAdd(sum1);
+    if (lane == 0u && row < DOWN_ROWS) {
+        output_data.values[row] =
+            sum0 * (127.0 * uintBitsToFloat(experts.values[e0 + DOWN_BASE + row])) * routing.values[2] +
+            sum1 * (127.0 * uintBitsToFloat(experts.values[e1 + DOWN_BASE + row])) * routing.values[3];
+    }
+}

@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer P{float v[];}partial;
+layout(set=0,binding=1,std430) writeonly buffer O{float v[];}outv;
+layout(push_constant) uniform U{uint chunks;uint heads;uint u0;uint u1;}p;
+const uint HD=128u,STRIDE=130u;
+void main(){
+    uint lane=gl_LocalInvocationID.x,head=gl_WorkGroupID.x;
+    if(head>=p.heads)return;
+    float maximum=-3.402823466e38,denominator=0.0,o0=0.0,o1=0.0;
+    for(uint c=0u;c<p.chunks;++c){
+        uint base=(c*p.heads+head)*STRIDE;
+        float pm=partial.v[base],pd=partial.v[base+1u];
+        float next=max(maximum,pm),old=exp(maximum-next),scale=exp(pm-next);
+        denominator=denominator*old+pd*scale;
+        o0=o0*old+partial.v[base+2u+lane]*scale;
+        o1=o1*old+partial.v[base+66u+lane]*scale;
+        maximum=next;
+    }
+    float inv=1.0/denominator;
+    outv.v[head*HD+lane]=o0*inv;
+    outv.v[head*HD+lane+64u]=o1*inv;
+}

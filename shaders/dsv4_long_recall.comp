@@ -1,0 +1,10 @@
+#version 450
+layout(local_size_x=256,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Exact{uint v[];} exact_indices;
+layout(set=0,binding=1,std430) readonly buffer Approx{uint v[];} approx_indices;
+layout(set=0,binding=2,std430) buffer Metrics{uint v[];} metrics;
+layout(set=0,binding=3,std430) readonly buffer DummyA{uint v;} a;
+layout(set=0,binding=4,std430) readonly buffer DummyB{uint v;} b;
+layout(set=0,binding=5,std430) readonly buffer DummyC{uint v;} c;
+layout(push_constant) uniform P{uint count;uint exact_offset;uint approx_offset;uint unused;} p;
+void main(){for(uint i=gl_GlobalInvocationID.x;i<p.count;i+=gl_NumWorkGroups.x*gl_WorkGroupSize.x){uint target=exact_indices.v[p.exact_offset+i],found=0u;for(uint j=0u;j<p.count;++j)if(approx_indices.v[p.approx_offset+j]==target){found=1u;break;}atomicAdd(metrics.v[0],found);atomicAdd(metrics.v[1],1u);}}

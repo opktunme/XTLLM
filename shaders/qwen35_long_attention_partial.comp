@@ -1,0 +1,85 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64, local_size_y=8, local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer QueryGate { float v[]; } query_gate;
+layout(set=0,binding=1,std430) readonly buffer KVCache { uint v[]; } cache;
+layout(set=0,binding=2,std430) writeonly buffer Partial { float v[]; } partial;
+layout(set=0,binding=3,std430) readonly buffer Dummy { uint v; } dummy;
+layout(push_constant) uniform P {
+    uint position;
+    uint max_context;
+    uint chunk_size;
+    uint chunks;
+} p;
+
+const uint HEAD_DIM = 256u;
+const uint KV_HEADS = 2u;
+const uint QUERY_HEADS = 32u;
+const uint HEADS_PER_GROUP = 8u;
+const uint PARTIAL_STRIDE = HEAD_DIM + 2u;
+shared float tile_k[HEAD_DIM];
+shared float tile_v[HEAD_DIM];
+
+float from_bf16(uint bits) { return uintBitsToFloat(bits << 16u); }
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint local_head = gl_LocalInvocationID.y;
+    uint chunk = gl_WorkGroupID.x / (QUERY_HEADS / HEADS_PER_GROUP);
+    uint head_block = gl_WorkGroupID.x % (QUERY_HEADS / HEADS_PER_GROUP);
+    uint head = head_block * HEADS_PER_GROUP + local_head;
+    uint kv = head / (QUERY_HEADS / KV_HEADS);
+    uint begin = chunk * p.chunk_size;
+    uint end = min(min(begin + p.chunk_size, p.position + 1u), p.max_context);
+    const uint pairs_per_head = HEAD_DIM / 2u;
+    const uint value_base = p.max_context * KV_HEADS * pairs_per_head;
+
+    float maximum = -3.402823466e+38;
+    float denominator = 0.0;
+    float output0 = 0.0, output1 = 0.0, output2 = 0.0, output3 = 0.0;
+    for (uint t = begin; t < end; ++t) {
+        if (local_head == 0u) {
+            for (uint s = 0u; s < 2u; ++s) {
+                uint pair = lane + s * 64u;
+                uint packed = cache.v[(t * KV_HEADS + kv) * pairs_per_head + pair];
+                tile_k[pair * 2u] = from_bf16(packed & 0xffffu);
+                tile_k[pair * 2u + 1u] = from_bf16(packed >> 16u);
+            }
+        } else if (local_head == 1u) {
+            for (uint s = 0u; s < 2u; ++s) {
+                uint pair = lane + s * 64u;
+                uint packed = cache.v[value_base +
+                    (t * KV_HEADS + kv) * pairs_per_head + pair];
+                tile_v[pair * 2u] = from_bf16(packed & 0xffffu);
+                tile_v[pair * 2u + 1u] = from_bf16(packed >> 16u);
+            }
+        }
+        barrier();
+        float dot = 0.0;
+        dot += query_gate.v[head * 512u + lane] * tile_k[lane];
+        dot += query_gate.v[head * 512u + lane + 64u] * tile_k[lane + 64u];
+        dot += query_gate.v[head * 512u + lane + 128u] * tile_k[lane + 128u];
+        dot += query_gate.v[head * 512u + lane + 192u] * tile_k[lane + 192u];
+        float score = subgroupAdd(dot) * 0.0625;
+        float next_maximum = max(maximum, score);
+        float old_scale = exp(maximum - next_maximum);
+        float new_scale = exp(score - next_maximum);
+        denominator = denominator * old_scale + new_scale;
+        output0 = output0 * old_scale + new_scale * tile_v[lane];
+        output1 = output1 * old_scale + new_scale * tile_v[lane + 64u];
+        output2 = output2 * old_scale + new_scale * tile_v[lane + 128u];
+        output3 = output3 * old_scale + new_scale * tile_v[lane + 192u];
+        maximum = next_maximum;
+        barrier();
+    }
+    uint base = (chunk * QUERY_HEADS + head) * PARTIAL_STRIDE;
+    if (lane == 0u) {
+        partial.v[base] = maximum;
+        partial.v[base + 1u] = denominator;
+    }
+    partial.v[base + 2u + lane] = output0;
+    partial.v[base + 2u + lane + 64u] = output1;
+    partial.v[base + 2u + lane + 128u] = output2;
+    partial.v[base + 2u + lane + 192u] = output3;
+}

@@ -1,0 +1,47 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer AttentionState{float values[];}state;
+layout(set=0,binding=1,std430) writeonly buffer Context{float values[];}context;
+layout(push_constant) uniform Params{uint position;uint model_dimension;uint head_dimension;uint kv_dimension;}params;
+const uint MAX_SEQUENCE=256u;
+shared float scores[MAX_SEQUENCE];
+shared float normalization;
+
+void main(){
+ const uint lane=gl_LocalInvocationID.x,head=gl_WorkGroupID.x;
+ const uint head_base=head*params.head_dimension;
+ const uint query_heads=params.model_dimension/params.head_dimension;
+ const uint kv_heads=params.kv_dimension/params.head_dimension;
+ const uint kv_head=head/(query_heads/kv_heads),kv_head_base=kv_head*params.head_dimension;
+ const float scale=inversesqrt(float(params.head_dimension));
+ for(uint source_index=0u;source_index<=params.position;++source_index){
+  const uint key_base=params.model_dimension+source_index*params.kv_dimension+kv_head_base;
+  float partial=state.values[head_base+lane]*state.values[key_base+lane];
+  if(lane+64u<params.head_dimension)partial+=state.values[head_base+lane+64u]*state.values[key_base+lane+64u];
+  const float score=subgroupAdd(partial)*scale;
+  if(lane==0u)scores[source_index]=score;
+ }
+ barrier();
+ if(lane==0u){
+  float maximum=-3.402823466e+38;
+  for(uint source_index=0u;source_index<=params.position;++source_index)maximum=max(maximum,scores[source_index]);
+  float denominator=0.0;
+  for(uint source_index=0u;source_index<=params.position;++source_index){
+   scores[source_index]=exp(scores[source_index]-maximum);denominator+=scores[source_index];
+  }
+  normalization=denominator;
+ }
+ barrier();
+ const float denominator=normalization;
+ const uint value_cache_base=params.model_dimension+MAX_SEQUENCE*params.kv_dimension;
+ for(uint dimension=lane;dimension<params.head_dimension;dimension+=64u){
+  float value=0.0;
+  for(uint source_index=0u;source_index<=params.position;++source_index){
+   const uint value_index=value_cache_base+source_index*params.kv_dimension+kv_head_base+dimension;
+   value+=(scores[source_index]/denominator)*state.values[value_index];
+  }
+  context.values[head_base+dimension]=value;
+ }
+}

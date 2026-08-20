@@ -1,0 +1,14 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer QKV { float v[]; } qkv;
+layout(set=0,binding=1,std430) readonly buffer Z { float v[]; } z;
+layout(set=0,binding=2,std430) readonly buffer AB { float v[]; } ab;
+layout(set=0,binding=3,std430) buffer State { float v[]; } state;
+layout(set=0,binding=4,std430) readonly buffer Params { float v[]; } params_data;
+layout(set=0,binding=5,std430) writeonly buffer OutputData { float v[]; } output_data;
+layout(push_constant) uniform P { uint heads; uint dimension; uint unused0; uint unused1; } p;
+float softplus(float x){return log(1.0+exp(-abs(x)))+max(x,0.0);}
+void main(){uint lane=gl_LocalInvocationID.x,h=gl_WorkGroupID.x;if(h>=p.heads)return;uint qh=h>>2u;float qss=0.0,kss=0.0;for(uint s=0u;s<2u;++s){uint d=lane+s*64u;float q=qkv.v[qh*128u+d],k=qkv.v[2048u+qh*128u+d];qss+=q*q;kss+=k*k;}qss=subgroupAdd(qss);kss=subgroupAdd(kss);float qi=inversesqrt(qss+1e-6)*0.0883883476483,ki=inversesqrt(kss+1e-6);float decay=exp(-exp(params_data.v[h])*softplus(ab.v[h]+params_data.v[64u+h]));float beta=1.0/(1.0+exp(-ab.v[64u+h]));float raw[2]=float[2](0.0,0.0);
+for(uint s=0u;s<2u;++s){uint vd=lane+s*64u;float mem=0.0;for(uint kd=0u;kd<128u;++kd)mem+=state.v[(h*128u+kd)*128u+vd]*decay*(qkv.v[2048u+qh*128u+kd]*ki);float delta=(qkv.v[4096u+h*128u+vd]-mem)*beta;float outv=0.0;for(uint kd=0u;kd<128u;++kd){uint ix=(h*128u+kd)*128u+vd;float sv=state.v[ix]*decay+(qkv.v[2048u+qh*128u+kd]*ki)*delta;state.v[ix]=sv;outv+=sv*(qkv.v[qh*128u+kd]*qi);}raw[s]=outv;}
+float ss=raw[0]*raw[0]+raw[1]*raw[1];ss=subgroupAdd(ss);float inv=inversesqrt(ss/128.0+1e-6);for(uint s=0u;s<2u;++s){uint d=lane+s*64u;float gate=z.v[h*128u+d];float silu=gate/(1.0+exp(-gate));output_data.v[h*128u+d]=raw[s]*inv*params_data.v[128u+d]*silu;}}

@@ -1,0 +1,48 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer QuantizedData { uint values[]; } quantized;
+layout(push_constant) uniform Params { uint count; uint group_size; uint unused0; uint unused1; } params;
+
+const uint Q2_OFFSET = 1024u;
+const uint SCALE1_OFFSET = 2048u;
+const uint SCALE2_OFFSET = 2112u;
+
+uint signed_byte(int value) { return uint(value) & 0xffu; }
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint groups = (params.count + params.group_size - 1u) / params.group_size;
+    for (uint group = lane; group < groups; group += 64u) {
+        const uint begin = group * params.group_size;
+        const uint end = min(begin + params.group_size, params.count);
+        float maximum1 = 0.0;
+        for (uint index = begin; index < end; ++index) maximum1 = max(maximum1, abs(input_data.values[index]));
+        const float scale1 = maximum1 > 0.0 ? maximum1 / 127.0 : 1.0;
+        float maximum2 = 0.0;
+        for (uint index = begin; index < end; ++index) {
+            const float q1 = round(clamp(input_data.values[index] / scale1, -127.0, 127.0));
+            maximum2 = max(maximum2, abs(input_data.values[index] - q1 * scale1));
+        }
+        const float scale2 = maximum2 > 0.0 ? maximum2 / 127.0 : 1.0;
+        quantized.values[SCALE1_OFFSET + group] = floatBitsToUint(scale1);
+        quantized.values[SCALE2_OFFSET + group] = floatBitsToUint(scale2);
+        for (uint index = begin; index < end; index += 4u) {
+            ivec4 q1 = ivec4(0), q2 = ivec4(0);
+            for (uint byte_index = 0; byte_index < 4u && index + byte_index < end; ++byte_index) {
+                const float value = input_data.values[index + byte_index];
+                const int first = int(round(clamp(value / scale1, -127.0, 127.0)));
+                q1[byte_index] = first;
+                q2[byte_index] = int(round(clamp((value - float(first) * scale1) / scale2,
+                                                 -127.0, 127.0)));
+            }
+            const uint packed_index = index >> 2u;
+            quantized.values[packed_index] = signed_byte(q1.x) | (signed_byte(q1.y) << 8u) |
+                (signed_byte(q1.z) << 16u) | (signed_byte(q1.w) << 24u);
+            quantized.values[Q2_OFFSET + packed_index] = signed_byte(q2.x) |
+                (signed_byte(q2.y) << 8u) | (signed_byte(q2.z) << 16u) |
+                (signed_byte(q2.w) << 24u);
+        }
+    }
+}

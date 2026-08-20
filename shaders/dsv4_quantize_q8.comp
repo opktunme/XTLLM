@@ -1,0 +1,53 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// One workgroup quantizes one group (32 for FP4 experts, 128 for row-Q8 GEMV).
+// Output layout is packed signed int8 words followed by one float scale per group.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer QuantizedData { uint values[]; } output_data;
+layout(set = 0, binding = 2, std430) readonly buffer DummyA { uint value; } dummy_a;
+layout(set = 0, binding = 3, std430) readonly buffer DummyB { uint value; } dummy_b;
+layout(push_constant) uniform Params {
+    uint count;
+    uint group_size;
+    uint packed_words;
+    uint scale_u32;
+} params;
+
+const uint MAX_GROUP_SIZE = 128u;
+
+uint byte_of(int v) { return uint(v) & 0xffu; }
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint group = gl_WorkGroupID.x;
+    const uint size = min(params.group_size, MAX_GROUP_SIZE);
+    const uint begin = group * params.group_size;
+    if (begin >= params.count || size == 0u) return;
+    const uint end = min(begin + size, params.count);
+
+    float maximum = 0.0;
+    for (uint step = 0u; step < 2u; ++step) {
+        const uint index = begin + lane + step * 64u;
+        if (index < end) maximum = max(maximum, abs(input_data.values[index]));
+    }
+    maximum = subgroupMax(maximum);
+    const float scale = maximum > 0.0 ? maximum / 127.0 : 1.0;
+    if (lane == 0u) output_data.values[params.scale_u32 + group] = floatBitsToUint(scale);
+
+    const uint words = (end - begin + 3u) >> 2u;
+    if (lane < words) {
+        const uint index = begin + lane * 4u;
+        ivec4 q = ivec4(0);
+        if (index < end) q.x = int(round(clamp(input_data.values[index] / scale, -127.0, 127.0)));
+        if (index + 1u < end) q.y = int(round(clamp(input_data.values[index + 1u] / scale, -127.0, 127.0)));
+        if (index + 2u < end) q.z = int(round(clamp(input_data.values[index + 2u] / scale, -127.0, 127.0)));
+        if (index + 3u < end) q.w = int(round(clamp(input_data.values[index + 3u] / scale, -127.0, 127.0)));
+        const uint word = (begin >> 2u) + lane;
+        if (word < params.packed_words) {
+            output_data.values[word] = byte_of(q.x) | (byte_of(q.y) << 8u) |
+                (byte_of(q.z) << 16u) | (byte_of(q.w) << 24u);
+        }
+    }
+}

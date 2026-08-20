@@ -1,0 +1,53 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer ExpertBlock { uint values[]; } experts;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint unused0; uint unused1; uint unused2; uint unused3; } params;
+
+const uint HIDDEN = 448u, GATE_ROWS = 896u, GATE_STRIDE = 1024u;
+const uint DOWN_ROWS = 4096u, DOWN_STRIDE = 112u;
+const uint EXPERT_WORDS = GATE_ROWS + GATE_ROWS * GATE_STRIDE + DOWN_ROWS + DOWN_ROWS * DOWN_STRIDE;
+int signed_byte(uint packed, uint byte_index) { return bitfieldExtract(int(packed), int(byte_index * 8u), 8); }
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    const uint expert0 = uint(round(routing.values[0])) * EXPERT_WORDS;
+    const uint expert1 = uint(round(routing.values[1])) * EXPERT_WORDS;
+    float g00=0.0,g01=0.0,g02=0.0,g03=0.0,u00=0.0,u01=0.0,u02=0.0,u03=0.0;
+    float g10=0.0,g11=0.0,g12=0.0,g13=0.0,u10=0.0,u11=0.0,u12=0.0,u13=0.0;
+    if (row < HIDDEN) {
+        const uint gb0 = expert0 + GATE_ROWS + row * GATE_STRIDE;
+        const uint ub0 = expert0 + GATE_ROWS + (row + HIDDEN) * GATE_STRIDE;
+        const uint gb1 = expert1 + GATE_ROWS + row * GATE_STRIDE;
+        const uint ub1 = expert1 + GATE_ROWS + (row + HIDDEN) * GATE_STRIDE;
+        for (uint packed_index = lane; packed_index < GATE_STRIDE; packed_index += 64u) {
+            const uint wg0=experts.values[gb0+packed_index], wu0=experts.values[ub0+packed_index];
+            const uint wg1=experts.values[gb1+packed_index], wu1=experts.values[ub1+packed_index];
+            const uint k=packed_index*4u;
+            const float x0=activations.values[k],x1=activations.values[k+1u],x2=activations.values[k+2u],x3=activations.values[k+3u];
+            g00+=x0*float(signed_byte(wg0,0u)); g01+=x1*float(signed_byte(wg0,1u));
+            g02+=x2*float(signed_byte(wg0,2u)); g03+=x3*float(signed_byte(wg0,3u));
+            u00+=x0*float(signed_byte(wu0,0u)); u01+=x1*float(signed_byte(wu0,1u));
+            u02+=x2*float(signed_byte(wu0,2u)); u03+=x3*float(signed_byte(wu0,3u));
+            g10+=x0*float(signed_byte(wg1,0u)); g11+=x1*float(signed_byte(wg1,1u));
+            g12+=x2*float(signed_byte(wg1,2u)); g13+=x3*float(signed_byte(wg1,3u));
+            u10+=x0*float(signed_byte(wu1,0u)); u11+=x1*float(signed_byte(wu1,1u));
+            u12+=x2*float(signed_byte(wu1,2u)); u13+=x3*float(signed_byte(wu1,3u));
+        }
+    }
+    const float gs0=subgroupAdd((g00+g01)+(g02+g03)), us0=subgroupAdd((u00+u01)+(u02+u03));
+    const float gs1=subgroupAdd((g10+g11)+(g12+g13)), us1=subgroupAdd((u10+u11)+(u12+u13));
+    if (lane==0u && row<HIDDEN) {
+        const float g0=gs0*uintBitsToFloat(experts.values[expert0+row]);
+        const float u0=us0*uintBitsToFloat(experts.values[expert0+row+HIDDEN]);
+        const float g1=gs1*uintBitsToFloat(experts.values[expert1+row]);
+        const float u1=us1*uintBitsToFloat(experts.values[expert1+row+HIDDEN]);
+        output_data.values[row]=(g0/(1.0+exp(-g0)))*u0;
+        output_data.values[HIDDEN+row]=(g1/(1.0+exp(-g1)))*u1;
+    }
+}

@@ -1,0 +1,100 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 1, std430) buffer Control { uint values[]; } control;
+layout(set = 0, binding = 2, std430) buffer Indirect { uint values[]; } indirect_data;
+layout(set = 0, binding = 3, std430) readonly buffer Dummy { uint value; } dummy;
+layout(push_constant) uniform Params {
+    uint copy_command;
+    uint stop_command;
+    uint command_limit;
+    uint unused;
+} params;
+
+const uint SLOT_COUNT = 20u;
+const uint EXPERT_TO_SLOT = 0u;
+const uint SLOT_EXPERT = 128u;
+const uint SLOT_AGE = 148u;
+const uint SELECTED_SLOT = 168u;
+const uint NEEDS_COPY = 172u;
+const uint MISSING_COUNT = 176u;
+const uint MISSING_ID = 177u;
+const uint MISSING_SLOT = 181u;
+const uint CLOCK = 185u;
+const uint HOST_ADDRESS = 256u;
+const uint SELECTED_ADDRESS = 512u;
+const uint CACHE_ADDRESS = 520u;
+const uint EXPERT_BLOCK_BYTES = 13236480u;
+
+uint64_t load_address(uint word) {
+    return uint64_t(control.values[word]) |
+           (uint64_t(control.values[word + 1u]) << 32u);
+}
+void store_address(uint word, uint64_t address) {
+    control.values[word] = uint(address);
+    control.values[word + 1u] = uint(address >> 32u);
+}
+
+void main() {
+    uint clock = control.values[CLOCK];
+    uint missing = 0u;
+    for (uint rank = 0u; rank < 4u; ++rank) {
+        const uint expert = uint(round(routing.values[rank]));
+        uint slot = control.values[EXPERT_TO_SLOT + expert];
+        uint mode = 0u;
+        uint64_t selected;
+        if (slot == 0xffffffffu) {
+            const uint64_t host = load_address(HOST_ADDRESS + expert * 2u);
+            if (host != uint64_t(0)) {
+                mode = 3u;
+                selected = host;
+                slot = 0xffffffffu;
+            } else {
+                uint oldest_age = 0xffffffffu;
+                slot = 0u;
+                for (uint candidate = 0u; candidate < SLOT_COUNT; ++candidate) {
+                    bool occupied = false;
+                    for (uint prior = 0u; prior < rank; ++prior)
+                        occupied = occupied ||
+                            control.values[SELECTED_SLOT + prior] == candidate;
+                    const uint age = control.values[SLOT_AGE + candidate];
+                    if (!occupied && age < oldest_age) {
+                        oldest_age = age;
+                        slot = candidate;
+                    }
+                }
+                const uint evicted = control.values[SLOT_EXPERT + slot];
+                if (evicted != 0xffffffffu)
+                    control.values[EXPERT_TO_SLOT + evicted] = 0xffffffffu;
+                control.values[EXPERT_TO_SLOT + expert] = slot;
+                control.values[SLOT_EXPERT + slot] = expert;
+                control.values[SLOT_AGE + slot] = ++clock;
+                mode = 2u;
+                selected = load_address(CACHE_ADDRESS) +
+                    uint64_t(slot) * uint64_t(EXPERT_BLOCK_BYTES);
+                control.values[MISSING_ID + missing] = expert;
+                control.values[MISSING_SLOT + missing] = slot;
+                ++missing;
+            }
+        } else {
+            selected = load_address(CACHE_ADDRESS) +
+                uint64_t(slot) * uint64_t(EXPERT_BLOCK_BYTES);
+            control.values[SLOT_AGE + slot] = ++clock;
+        }
+        control.values[SELECTED_SLOT + rank] = slot;
+        control.values[NEEDS_COPY + rank] = mode;
+        store_address(SELECTED_ADDRESS + rank * 2u, selected);
+    }
+    control.values[CLOCK] = clock;
+    control.values[MISSING_COUNT] = missing;
+
+    if (missing != 0u) {
+        for (uint command = params.copy_command;
+             command < params.command_limit; ++command)
+            indirect_data.values[command * 3u] = 0u;
+    } else {
+        indirect_data.values[params.copy_command * 3u] = 0u;
+    }
+}

@@ -1,0 +1,14 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Act { uint v[]; } act;
+layout(set=0,binding=1,std430) readonly buffer Expert { uint v[]; } ex;
+layout(set=0,binding=2,std430) readonly buffer Routes { uint v[]; } routes;
+layout(set=0,binding=3,std430) writeonly buffer Out { float v[]; } out_data;
+layout(push_constant) uniform P { uint rank; uint activation_scale_u32; uint unused0; uint unused1; } p;
+const uint DIM=3072u,EDIM=1024u,GROUPS=16u,WORDS=8u,DOWN_S=3342336u,DOWN_W=3440640u;
+uint sn(uint n){uint b=(n&15u)|((n&240u)<<4u)|((n&3840u)<<8u)|((n&61440u)<<12u);uint s=b&0x08080808u;return b|(s<<1u)|(s<<2u)|(s<<3u)|(s<<4u);}
+int dq(uint w,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sn(w&65535u)))+dotPacked4x8EXT(int(a1),int(sn(w>>16u)));}
+float bf(uint index){uint h=(ex.v[(DOWN_S>>2u)+(index>>1u)]>>((index&1u)*16u))&65535u;return uintBitsToFloat(h<<16u);}
+void main(){uint lane=gl_LocalInvocationID.x,frag=lane&1u,group=lane>>1u,first=gl_WorkGroupID.x*8u;float sum[8]=float[8](0,0,0,0,0,0,0,0);if(group<GROUPS){uint wi=frag*4u;uint ab=p.rank*256u+group*16u+wi*2u;float as=uintBitsToFloat(act.v[p.activation_scale_u32+p.rank*8u+(group>>1u)]);for(uint r=0u;r<8u;++r){uint row=first+r;if(row<DIM){uint base=(DOWN_W>>2u)+row*(GROUPS*WORDS)+wi*GROUPS+group;int s=dq(ex.v[base],act.v[ab],act.v[ab+1u]);s+=dq(ex.v[base+GROUPS],act.v[ab+2u],act.v[ab+3u]);s+=dq(ex.v[base+2u*GROUPS],act.v[ab+4u],act.v[ab+5u]);s+=dq(ex.v[base+3u*GROUPS],act.v[ab+6u],act.v[ab+7u]);sum[r]+=float(s)*as*bf(row*GROUPS+group);}}}for(uint r=0u;r<8u;++r)sum[r]=subgroupAdd(sum[r]);if(lane==0u){float rw=uintBitsToFloat(routes.v[8u+p.rank]);for(uint r=0u;r<8u;++r){uint row=first+r;if(row<DIM)out_data.v[p.rank*DIM+row]=sum[r]*rw;}}}

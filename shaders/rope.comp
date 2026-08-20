@@ -1,0 +1,41 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputQKV { float values[]; } input_qkv;
+layout(set = 0, binding = 1, std430) readonly buffer RopeCos { float values[]; } rope_cos;
+layout(set = 0, binding = 2, std430) readonly buffer RopeSin { float values[]; } rope_sin;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputQKV { float values[]; } output_qkv;
+
+layout(push_constant) uniform Params {
+    uint tokens;
+    uint model_dimension;
+    uint head_dimension;
+    uint qkv_dimension;
+} params;
+
+void main() {
+    const uint element = gl_GlobalInvocationID.x;
+    const uint token = gl_GlobalInvocationID.y;
+    if (token >= params.tokens || element >= params.qkv_dimension) return;
+
+    const uint row_base = token * params.qkv_dimension;
+    if (element >= 2 * params.model_dimension) {
+        output_qkv.values[row_base + element] = input_qkv.values[row_base + element];
+        return;
+    }
+
+    const uint vector_dimension = element % params.model_dimension;
+    const uint head_offset = vector_dimension % params.head_dimension;
+    const uint paired_offset = head_offset ^ 1u;
+    const uint paired_dimension = vector_dimension - head_offset + paired_offset;
+    const uint projection_base = (element / params.model_dimension) * params.model_dimension;
+    const float current = input_qkv.values[row_base + element];
+    const float paired = input_qkv.values[row_base + projection_base + paired_dimension];
+    const uint rope_index = token * (params.head_dimension / 2) + head_offset / 2;
+    const float cosine = rope_cos.values[rope_index];
+    const float sine = rope_sin.values[rope_index];
+    output_qkv.values[row_base + element] =
+        (head_offset & 1u) == 0u ? current * cosine - paired * sine
+                                 : paired * sine + current * cosine;
+}

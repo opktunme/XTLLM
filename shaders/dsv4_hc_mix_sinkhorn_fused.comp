@@ -1,0 +1,55 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// DeepSeek HC=4 preamble. Six wave64 subgroups compute the 24 HC-function
+// projections in parallel, then one lane performs the exact 4x4 Sinkhorn.
+// The finite workgroup replaces two dispatches and their intermediate buffer.
+layout(local_size_x=64,local_size_y=6,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer HCState{float v[];} state;
+layout(set=0,binding=1,std430) readonly buffer HCFunction{float v[];} fn;
+layout(set=0,binding=2,std430) readonly buffer HCScales{float v[];} scales;
+layout(set=0,binding=3,std430) readonly buffer HCBases{float v[];} bases;
+layout(set=0,binding=4,std430) writeonly buffer SplitOutput{float v[];} split;
+layout(push_constant) uniform P{uint rms_epsilon_bits;uint hc_epsilon_bits;uint unused0;uint unused1;} p;
+
+shared float mixes[24];
+
+void main(){
+    const uint lane=gl_LocalInvocationID.x;
+    const uint wave=gl_LocalInvocationID.y;
+    const uint first_mix=wave*4u;
+    float square_sum=0.0;
+    float dots[4]=float[4](0.0,0.0,0.0,0.0);
+    for(uint step=0u;step<256u;++step){
+        const uint index=lane+step*64u;
+        const float x=state.v[index];
+        square_sum+=x*x;
+        for(uint r=0u;r<4u;++r)dots[r]+=x*fn.v[(first_mix+r)*16384u+index];
+    }
+    square_sum=subgroupAdd(square_sum);
+    const float inv_rms=inversesqrt(square_sum/16384.0+uintBitsToFloat(p.rms_epsilon_bits));
+    for(uint r=0u;r<4u;++r)dots[r]=subgroupAdd(dots[r]);
+    if(lane==0u)for(uint r=0u;r<4u;++r)mixes[first_mix+r]=dots[r]*inv_rms;
+    barrier();
+
+    if(wave!=0u||lane!=0u)return;
+    const float eps=uintBitsToFloat(p.hc_epsilon_bits);
+    for(uint j=0u;j<4u;++j){
+        split.v[j]=1.0/(1.0+exp(-(mixes[j]*scales.v[0]+bases.v[j])))+eps;
+        split.v[4u+j]=2.0/(1.0+exp(-(mixes[4u+j]*scales.v[1]+bases.v[4u+j])));
+    }
+    float comb[16];
+    for(uint row=0u;row<4u;++row){
+        float row_max=-3.402823466e+38;
+        for(uint col=0u;col<4u;++col){uint i=row*4u+col;comb[i]=mixes[8u+i]*scales.v[2]+bases.v[8u+i];row_max=max(row_max,comb[i]);}
+        float row_sum=0.0;
+        for(uint col=0u;col<4u;++col){uint i=row*4u+col;comb[i]=exp(comb[i]-row_max);row_sum+=comb[i];}
+        for(uint col=0u;col<4u;++col)comb[row*4u+col]=comb[row*4u+col]/row_sum+eps;
+    }
+    for(uint col=0u;col<4u;++col){float sum=0.0;for(uint row=0u;row<4u;++row)sum+=comb[row*4u+col];for(uint row=0u;row<4u;++row)comb[row*4u+col]/=sum+eps;}
+    for(uint iteration=1u;iteration<20u;++iteration){
+        for(uint row=0u;row<4u;++row){float sum=0.0;for(uint col=0u;col<4u;++col)sum+=comb[row*4u+col];for(uint col=0u;col<4u;++col)comb[row*4u+col]/=sum+eps;}
+        for(uint col=0u;col<4u;++col){float sum=0.0;for(uint row=0u;row<4u;++row)sum+=comb[row*4u+col];for(uint row=0u;row<4u;++row)comb[row*4u+col]/=sum+eps;}
+    }
+    for(uint i=0u;i<16u;++i)split.v[8u+i]=comb[i];
+}

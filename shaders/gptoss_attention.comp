@@ -1,0 +1,58 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer AttentionState { float values[]; } state;
+layout(set = 0, binding = 1, std430) readonly buffer Sinks { float values[]; } sinks;
+layout(set = 0, binding = 2, std430) writeonly buffer Context { float values[]; } context;
+layout(set = 0, binding = 3, std430) readonly buffer Dummy { uint value; } dummy;
+layout(push_constant) uniform Params { uint position; uint model_dimension; uint head_dimension; uint kv_and_sliding; } params;
+
+const uint MAX_SEQUENCE = 256u;
+const uint SLIDING_WINDOW = 128u;
+shared float scores[MAX_SEQUENCE];
+shared float normalization;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint wave = gl_LocalInvocationID.y;
+    const uint local = gl_LocalInvocationIndex;
+    const uint head = gl_WorkGroupID.x;
+    const uint kv_dimension = params.kv_and_sliding & 0xffffu;
+    const bool sliding = (params.kv_and_sliding & 0x10000u) != 0u;
+    const uint first = sliding && params.position + 1u > SLIDING_WINDOW ?
+                       params.position + 1u - SLIDING_WINDOW : 0u;
+    const uint head_base = head * params.head_dimension;
+    const uint query_heads = params.model_dimension / params.head_dimension;
+    const uint kv_heads = kv_dimension / params.head_dimension;
+    const uint kv_head = head / (query_heads / kv_heads);
+    const uint kv_head_base = kv_head * params.head_dimension;
+    for (uint source = first + wave; source <= params.position; source += 8u) {
+        const uint key_base = params.model_dimension + source * kv_dimension + kv_head_base;
+        const float score = subgroupAdd(state.values[head_base + lane] *
+                                        state.values[key_base + lane]) * 0.125;
+        if (lane == 0u) scores[source] = score;
+    }
+    barrier();
+    if (local == 0u) {
+        float maximum = sinks.values[head];
+        for (uint source = first; source <= params.position; ++source)
+            maximum = max(maximum, scores[source]);
+        float denominator = exp(sinks.values[head] - maximum);
+        for (uint source = first; source <= params.position; ++source) {
+            scores[source] = exp(scores[source] - maximum);
+            denominator += scores[source];
+        }
+        normalization = denominator;
+    }
+    barrier();
+    if (local < params.head_dimension) {
+        const uint value_base = params.model_dimension + MAX_SEQUENCE * kv_dimension;
+        float value = 0.0;
+        for (uint source = first; source <= params.position; ++source) {
+            value += scores[source] / normalization *
+                     state.values[value_base + source * kv_dimension + kv_head_base + local];
+        }
+        context.values[head_base + local] = value;
+    }
+}

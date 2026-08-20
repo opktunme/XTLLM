@@ -1,0 +1,47 @@
+#version 450
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) writeonly buffer ExpertArena { uvec4 values[]; } arena;
+layout(set = 0, binding = 1, std430) coherent volatile buffer Control { uint values[]; } control;
+layout(set = 0, binding = 2, std430) readonly buffer DummyA { uint value; } dummy_a;
+layout(set = 0, binding = 3, std430) readonly buffer DummyB { uint value; } dummy_b;
+layout(push_constant) uniform Params { uvec4 unused; } params;
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer HostExpert {
+    uvec4 values[];
+};
+
+const uint EXPERT_BLOCK_VEC4 = 827280u;
+const uint SELECTED_SLOT = 168u;
+const uint NEEDS_COPY = 172u;
+const uint HOST_ADDRESS = 256u;
+const uint REQUEST_STATE = 186u;
+const uint COLD_ADDRESS = 528u;
+
+uint64_t load_address(uint word) {
+    return uint64_t(control.values[word]) |
+           (uint64_t(control.values[word + 1u]) << 32u);
+}
+
+void main() {
+    const uint rank = gl_WorkGroupID.y;
+    if (rank >= 4u) return;
+    const uint mode = control.values[NEEDS_COPY + rank];
+    if (mode == 0u) return;
+    const uint route_expert = control.values[128u + control.values[SELECTED_SLOT + rank]];
+    uint64_t source_address;
+    if (mode == 2u) {
+        while (atomicAdd(control.values[REQUEST_STATE], 0u) < 3u) { }
+        memoryBarrierBuffer();
+        source_address = load_address(COLD_ADDRESS + rank * 2u);
+    } else {
+        source_address = load_address(HOST_ADDRESS + route_expert * 2u);
+    }
+    HostExpert source = HostExpert(source_address);
+    const uint destination = control.values[SELECTED_SLOT + rank] * EXPERT_BLOCK_VEC4;
+    const uint thread_index = gl_WorkGroupID.x * 256u + gl_LocalInvocationID.x;
+    const uint stride = gl_NumWorkGroups.x * 256u;
+    for (uint index = thread_index; index < EXPERT_BLOCK_VEC4; index += stride)
+        arena.values[destination + index] = source.values[index];
+}

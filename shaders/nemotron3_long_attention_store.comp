@@ -1,0 +1,19 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Q{float v[];}q;
+layout(set=0,binding=1,std430) readonly buffer K{float v[];}k;
+layout(set=0,binding=2,std430) readonly buffer V{float v[];}v;
+layout(set=0,binding=3,std430) buffer C{uint v[];}cache;
+layout(push_constant) uniform P{uint pos;uint max_context;uint qheads;uint u;}p;
+const uint HD=128u,KVH=2u;
+uint bf16(float x){uint b=floatBitsToUint(x);b+=0x7fffu+((b>>16u)&1u);return b>>16u;}
+void main(){
+    uint pair=gl_GlobalInvocationID.x;
+    if(pair>=KVH*HD/2u)return;
+    uint d=pair*2u;
+    uint kp=bf16(k.v[d])|(bf16(k.v[d+1u])<<16u);
+    uint vp=bf16(v.v[d])|(bf16(v.v[d+1u])<<16u);
+    uint value_base=p.max_context*KVH*(HD/2u);
+    uint offset=p.pos*KVH*(HD/2u)+pair;
+    cache.v[offset]=kp; cache.v[value_base+offset]=vp;
+}

@@ -1,0 +1,12 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Q{float v[];}q;
+layout(set=0,binding=1,std430) readonly buffer K{float v[];}kv;
+layout(set=0,binding=2,std430) readonly buffer I{uint v[];}idx;
+layout(set=0,binding=3,std430) readonly buffer S{float v[];}sink;
+layout(set=0,binding=4,std430) writeonly buffer O{float v[];}o;
+layout(push_constant) uniform P{uint heads;uint head_dim;uint source_count;uint batch;}p;
+shared float scores[160];shared float denom;
+void main(){uint h=gl_WorkGroupID.x,t=gl_WorkGroupID.y,lane=gl_LocalInvocationID.x;if(h>=p.heads||t>=p.batch)return;float sc=inversesqrt(float(p.head_dim));for(uint n=0u;n<p.source_count;++n){uint slot=idx.v[n];float d=0.0;for(uint z=0u;z<8u;++z){uint k=lane+z*64u;if(k<p.head_dim)d+=q.v[(t*p.heads+h)*p.head_dim+k]*kv.v[slot*p.head_dim+k];}d=subgroupAdd(d);if(lane==0u)scores[n]=d*sc;}barrier();if(lane==0u){float m=sink.v[h];for(uint n=0u;n<p.source_count;++n)m=max(m,scores[n]);float sum=exp(sink.v[h]-m);for(uint n=0u;n<p.source_count;++n){scores[n]=exp(scores[n]-m);sum+=scores[n];}denom=sum;}barrier();for(uint z=0u;z<8u;++z){uint k=lane+z*64u;if(k<p.head_dim){float v=0.0;for(uint n=0u;n<p.source_count;++n)v+=scores[n]*kv.v[idx.v[n]*p.head_dim+k];o.v[(t*p.heads+h)*p.head_dim+k]=v/denom;}}}

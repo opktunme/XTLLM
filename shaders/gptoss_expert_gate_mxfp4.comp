@@ -1,0 +1,80 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { vec4 values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer ExpertData { uint values[]; } expert_data;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint rank; uint unused0; uint unused1; uint unused2; } params;
+
+const uint DIMENSION = 2880u;
+const uint HIDDEN = 2880u;
+const uint BLOCKS_PER_ROW = 90u;
+const uint MLP1_BLOCK_U32 = 0u;
+const uint MLP1_SCALE_BYTE = 8294400u;
+const uint MLP1_BIAS_BYTE = 8812800u;
+const float MAGNITUDES[8] = float[](0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0);
+
+uint load_byte(uint byte_offset) {
+    const uint word = expert_data.values[byte_offset >> 2u];
+    return (word >> ((byte_offset & 3u) * 8u)) & 255u;
+}
+
+float load_bf16(uint byte_offset) {
+    const uint word = expert_data.values[byte_offset >> 2u];
+    const uint bits = (word >> ((byte_offset & 2u) * 8u)) & 0xffffu;
+    return uintBitsToFloat(bits << 16u);
+}
+
+float fp4(uint nibble) {
+    const float value = MAGNITUDES[nibble & 7u];
+    return (nibble & 8u) != 0u ? -value : value;
+}
+
+float dot_word(uint packed, uint activation_index) {
+    const vec4 low = vec4(fp4(packed), fp4(packed >> 4u),
+                          fp4(packed >> 8u), fp4(packed >> 12u));
+    const vec4 high = vec4(fp4(packed >> 16u), fp4(packed >> 20u),
+                           fp4(packed >> 24u), fp4(packed >> 28u));
+    return dot(activations.values[activation_index], low) +
+           dot(activations.values[activation_index + 1u], high);
+}
+
+float block_dot(uint row, uint block) {
+    const uint word_base = MLP1_BLOCK_U32 + (row * BLOCKS_PER_ROW + block) * 4u;
+    const uint input_base = block * 8u;
+    return dot_word(expert_data.values[word_base], input_base) +
+           dot_word(expert_data.values[word_base + 1u], input_base + 2u) +
+           dot_word(expert_data.values[word_base + 2u], input_base + 4u) +
+           dot_word(expert_data.values[word_base + 3u], input_base + 6u);
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint unit = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    float gate = 0.0;
+    float linear = 0.0;
+    if (unit < HIDDEN) {
+        const uint gate_row = unit * 2u;
+        const uint linear_row = gate_row + 1u;
+        for (uint block = lane; block < BLOCKS_PER_ROW; block += 64u) {
+            const float gate_scale = uintBitsToFloat(
+                load_byte(MLP1_SCALE_BYTE + (gate_row * BLOCKS_PER_ROW + block)) << 23u);
+            const float linear_scale = uintBitsToFloat(
+                load_byte(MLP1_SCALE_BYTE + (linear_row * BLOCKS_PER_ROW + block)) << 23u);
+            gate += block_dot(gate_row, block) * gate_scale;
+            linear += block_dot(linear_row, block) * linear_scale;
+        }
+    }
+    gate = subgroupAdd(gate);
+    linear = subgroupAdd(linear);
+    if (lane == 0u && unit < HIDDEN) {
+        gate += load_bf16(MLP1_BIAS_BYTE + unit * 4u);
+        linear += load_bf16(MLP1_BIAS_BYTE + unit * 4u + 2u);
+        const float limited_gate = min(gate, 7.0);
+        const float limited_linear = clamp(linear, -7.0, 7.0);
+        const float swish = limited_gate / (1.0 + exp(-1.702 * limited_gate));
+        output_data.values[params.rank * HIDDEN + unit] = swish * (limited_linear + 1.0);
+    }
+}

@@ -1,0 +1,22 @@
+#version 450
+
+// Reduce the six independently written routed-expert outputs in deterministic
+// rank order. The destination aliases rank zero, but each invocation loads its
+// complete scalar tuple before replacing that same rank-zero scalar.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) buffer ExpertOutputs { float values[]; } outputs;
+layout(push_constant) uniform Params {
+    uint count;
+    uint ranks;
+    uint unused0;
+    uint unused1;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= params.count) return;
+    float sum = outputs.values[index];
+    for (uint rank = 1u; rank < params.ranks; ++rank)
+        sum += outputs.values[rank * params.count + index];
+    outputs.values[index] = sum;
+}

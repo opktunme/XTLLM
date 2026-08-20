@@ -1,0 +1,47 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { vec4 values[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer RouterWeight { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer RouterBias { float values[]; } bias;
+layout(set = 0, binding = 3, std430) buffer Routing { float values[]; } routing;
+layout(push_constant) uniform Params { uint dimension; uint experts; uint top_k; uint unused; } params;
+
+shared uint quantized_input[720];
+shared float input_scale;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint expert = gl_WorkGroupID.x;
+    if (expert >= params.experts) return;
+    const uint stride = params.dimension / 4u;
+    float maximum = 0.0;
+    for (uint column = lane; column < stride; column += 64u) {
+        const vec4 value = abs(input_data.values[column]);
+        maximum = max(maximum, max(max(value.x, value.y), max(value.z, value.w)));
+    }
+    maximum = subgroupMax(maximum);
+    if (lane == 0u) input_scale = maximum / 127.0;
+    barrier();
+    for (uint column = lane; column < stride; column += 64u) {
+        const ivec4 q = ivec4(clamp(round(input_data.values[column] / input_scale),
+                                    vec4(-127.0), vec4(127.0)));
+        quantized_input[column] = (uint(q.x) & 255u) |
+                                  ((uint(q.y) & 255u) << 8u) |
+                                  ((uint(q.z) & 255u) << 16u) |
+                                  ((uint(q.w) & 255u) << 24u);
+    }
+    barrier();
+    int sum = 0;
+    const uint base = params.experts + expert * stride;
+    for (uint column = lane; column < stride; column += 64u)
+        sum += dotPacked4x8EXT(int(quantized_input[column]),
+                              int(weights.values[base + column]));
+    sum = subgroupAdd(sum);
+    if (lane == 0u) {
+        const float scale = input_scale * uintBitsToFloat(weights.values[expert]);
+        routing.values[24u + expert] = float(sum) * scale + bias.values[expert];
+    }
+}

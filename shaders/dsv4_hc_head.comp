@@ -1,0 +1,57 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Final HC head: sigmoid normalized mixes then weighted HC reduction.
+// Param buffer layout at binding2: scale at [0], base[hc] at [1..hc].
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer HCState { float values[]; } state;
+layout(set = 0, binding = 1, std430) readonly buffer HCFunction { float values[]; } fn;
+layout(set = 0, binding = 2, std430) readonly buffer HCParams { float values[]; } hc_params;
+layout(set = 0, binding = 3, std430) writeonly buffer HeadOutput { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint dimension;
+    uint hc;
+    uint epsilon_bits;
+    uint unused;
+} params;
+
+const uint MAX_FLAT_STEPS = 256u;
+shared float pre[4];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint token = gl_WorkGroupID.x;
+    const uint total = min(params.dimension * params.hc, 16384u);
+    float square_sum = 0.0;
+    float dots[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (uint step = 0u; step < MAX_FLAT_STEPS; ++step) {
+        const uint i = lane + step * 64u;
+        if (i < total) {
+            const float x = state.values[token * total + i];
+            square_sum += x * x;
+            for (uint h = 0u; h < 4u; ++h)
+                if (h < params.hc) dots[h] += x * fn.values[h * total + i];
+        }
+    }
+    square_sum = subgroupAdd(square_sum);
+    const float inv_rms = inversesqrt(square_sum / float(total) +
+                                      uintBitsToFloat(params.epsilon_bits));
+    for (uint h = 0u; h < 4u; ++h) dots[h] = subgroupAdd(dots[h]);
+    if (lane == 0u) {
+        for (uint h = 0u; h < 4u; ++h) if (h < params.hc) {
+            const float mix = dots[h] * inv_rms;
+            pre[h] = 1.0 / (1.0 + exp(-(mix * hc_params.values[0] + hc_params.values[1u + h]))) +
+                     uintBitsToFloat(params.epsilon_bits);
+        }
+    }
+    barrier();
+    for (uint step = 0u; step < 64u; ++step) {
+        const uint column = lane + step * 64u;
+        if (column < params.dimension) {
+            float value = 0.0;
+            for (uint h = 0u; h < 4u; ++h)
+                if (h < params.hc) value += pre[h] * state.values[token * total + h * params.dimension + column];
+            output_data.values[token * params.dimension + column] = value;
+        }
+    }
+}

@@ -1,0 +1,82 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) buffer AddressTable { uint64_t values[]; } addresses;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(set = 0, binding = 4, std430) readonly buffer Residual { float values[]; } residual;
+layout(push_constant) uniform Params { uvec4 unused; } params;
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer ExpertData {
+    uint values[];
+};
+
+const uint DIMENSION = 2880u;
+const uint HIDDEN = 2880u;
+const uint PACKED = 720u;
+const uint RANK_STRIDE = 721u;
+const uint GROUPS_PER_ROW = 45u;
+const uint WORDS_PER_ROW = 360u;
+const uint MLP2_BLOCK_U32 = 2206080u;
+const uint MLP2_SCALE_BYTE = 12971520u;
+const uint MLP2_BIAS_BYTE = 13230720u;
+
+float load_bf16(ExpertData data, uint byte_offset) {
+    const uint word = data.values[byte_offset >> 2u];
+    return uintBitsToFloat(((word >> ((byte_offset & 2u) * 8u)) & 0xffffu) << 16u);
+}
+uint signed_nibbles(uint n) {
+    uint b = (n & 0x000fu) | ((n & 0x00f0u) << 4u) |
+             ((n & 0x0f00u) << 8u) | ((n & 0xf000u) << 12u);
+    const uint s = b & 0x08080808u;
+    return b | (s << 1u) | (s << 2u) | (s << 3u) | (s << 4u);
+}
+int dot_word(ExpertData data, uint word, uint activation_base, uint activation_word) {
+    const uint packed = data.values[word];
+    return dotPacked4x8EXT(int(activations.values[activation_base + activation_word]),
+                           int(signed_nibbles(packed & 0xffffu))) +
+           dotPacked4x8EXT(int(activations.values[activation_base + activation_word + 1u]),
+                           int(signed_nibbles(packed >> 16u)));
+}
+int group_dot(ExpertData data, uint row, uint group, uint activation_base) {
+    const uint row_base = MLP2_BLOCK_U32 + row * WORDS_PER_ROW;
+    const uint activation_word = group * 16u;
+    return dot_word(data, row_base + group, activation_base, activation_word) +
+           dot_word(data, row_base + GROUPS_PER_ROW + group, activation_base, activation_word + 2u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 2u + group, activation_base, activation_word + 4u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 3u + group, activation_base, activation_word + 6u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 4u + group, activation_base, activation_word + 8u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 5u + group, activation_base, activation_word + 10u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 6u + group, activation_base, activation_word + 12u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 7u + group, activation_base, activation_word + 14u);
+}
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    float total = 0.0;
+    for (uint rank = 0u; rank < 4u; ++rank) {
+        const uint expert = uint(round(routing.values[rank]));
+        const uint64_t address = addresses.values[expert];
+        if (address == uint64_t(0)) continue;
+        ExpertData data = ExpertData(address);
+        const uint activation_base = rank * RANK_STRIDE;
+        float sum = 0.0;
+        if (row < DIMENSION) {
+            for (uint group = lane; group < GROUPS_PER_ROW; group += 64u)
+                sum += float(group_dot(data, row, group, activation_base)) *
+                    load_bf16(data, MLP2_SCALE_BYTE +
+                                    (row * GROUPS_PER_ROW + group) * 2u);
+        }
+        sum = subgroupAdd(sum) *
+              uintBitsToFloat(activations.values[activation_base + PACKED]);
+        if (lane == 0u && row < DIMENSION)
+            total += (sum + load_bf16(data, MLP2_BIAS_BYTE + row * 2u)) *
+                     routing.values[4u + rank];
+    }
+    if (lane == 0u && row < DIMENSION)
+        output_data.values[row] = total + residual.values[row];
+}

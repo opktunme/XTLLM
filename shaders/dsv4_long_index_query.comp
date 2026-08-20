@@ -1,0 +1,57 @@
+#version 450
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer InputData{float v[];} input_data;
+layout(set=0,binding=1,std430) writeonly buffer OutputData{uint v[];} output_data;
+layout(set=0,binding=2,std430) readonly buffer DummyA{uint v;} a;
+layout(set=0,binding=3,std430) readonly buffer DummyB{uint v;} b;
+layout(set=0,binding=4,std430) readonly buffer DummyC{uint v;} c;
+layout(set=0,binding=5,std430) readonly buffer DummyD{uint v;} d;
+layout(push_constant) uniform P{uint position;uint vectors;uint unused0;uint unused1;} p;
+shared float x[128]; shared float y[128];
+shared float fp4_scale[4];
+
+float rope_frequency(uint frequency){
+    const float base=160000.0,pi=3.14159265358979323846;
+    float value=1.0/pow(base,float(frequency*2u)/64.0);
+    float low=max(floor(64.0*log(65536.0/(32.0*2.0*pi))/(2.0*log(base))),0.0);
+    float high=min(ceil(64.0*log(65536.0/(2.0*pi))/(2.0*log(base))),63.0);
+    float blend=1.0-clamp((float(frequency)-low)/(high-low),0.0,1.0);
+    return value/16.0*(1.0-blend)+value*blend;
+}
+float fp4_sim(float value,float scale){
+    float a=abs(value/scale),q;
+    if(a<0.25)q=0.0;else if(a<0.75)q=0.5;else if(a<1.25)q=1.0;else if(a<1.75)q=1.5;
+    else if(a<2.5)q=2.0;else if(a<3.5)q=3.0;else if(a<5.0)q=4.0;else q=6.0;
+    return (value<0.0?-q:q)*scale;
+}
+uint fp4_code(float value,float scale){
+    float a=abs(value/scale);uint magnitude;
+    if(a<0.25)magnitude=0u;else if(a<0.75)magnitude=1u;else if(a<1.25)magnitude=2u;
+    else if(a<1.75)magnitude=3u;else if(a<2.5)magnitude=4u;else if(a<3.5)magnitude=5u;
+    else if(a<5.0)magnitude=6u;else magnitude=7u;
+    return magnitude|((value<0.0&&magnitude!=0u)?8u:0u);
+}
+void main(){
+    uint head=gl_WorkGroupID.x,lane=gl_LocalInvocationID.x;if(head>=p.vectors)return;
+    x[lane]=input_data.v[head*128u+lane];x[lane+64u]=input_data.v[head*128u+lane+64u];barrier();
+    float angle=float(p.position)*rope_frequency(lane>>1u),co=cos(angle),si=sin(angle);
+    float a0=x[64u+lane],b0=x[64u+(lane^1u)];y[lane]=(lane&1u)==0u?a0*co-b0*si:a0*co+b0*si;
+    x[lane+64u]=y[lane];barrier();
+    for(uint step=1u;step<128u;step<<=1u){
+        uint pair=lane,block=pair/step,within=pair%step,i=block*(step*2u)+within,j=i+step;
+        float u=x[i],v=x[j];y[i]=u+v;y[j]=u-v;barrier();x[lane]=y[lane];x[lane+64u]=y[lane+64u];barrier();
+    }
+    float norm=inversesqrt(128.0);x[lane]*=norm;x[lane+64u]*=norm;barrier();
+    if(lane<4u){uint begin=lane*32u;float am=0.0;for(uint i=0u;i<32u;++i)am=max(am,abs(x[begin+i]));
+        float scale=am>0.0?exp2(ceil(log2(max(am/6.0,1.17549435e-38)))):1.0;
+        fp4_scale[lane]=scale;
+        for(uint i=0u;i<32u;++i)x[begin+i]=fp4_sim(x[begin+i],scale);}
+    barrier();
+    const uint stride=17u;
+    if(lane<16u){uint packed=0u;for(uint item=0u;item<8u;++item){uint d=lane*8u+item;
+        packed|=fp4_code(x[d],fp4_scale[d/32u])<<(item*4u);}output_data.v[head*stride+lane]=packed;}
+    if(lane==0u){uint exponents=0u;for(uint block=0u;block<4u;++block)
+        exponents|=((floatBitsToUint(fp4_scale[block])>>23u)&255u)<<(block*8u);
+        output_data.v[head*stride+16u]=exponents;}
+}

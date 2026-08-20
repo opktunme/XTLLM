@@ -1,0 +1,33 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer HalfExpertBlock { uint values[]; } experts;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint rank; uint unused0; uint unused1; uint unused2; } params;
+
+const uint HIDDEN = 448u, DIMENSION = 4096u;
+const uint GATE_HALF_WORDS = 896u * 2048u;
+const uint DOWN_HALF_STRIDE = 224u;
+const uint DOWN_HALF_WORDS = DIMENSION * DOWN_HALF_STRIDE;
+const uint EXPERT_HALF_WORDS = GATE_HALF_WORDS + DOWN_HALF_WORDS;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    const uint expert_base = uint(round(routing.values[params.rank])) * EXPERT_HALF_WORDS;
+    float sum0 = 0.0, sum1 = 0.0;
+    if (row < DIMENSION) {
+        const uint weight_base = expert_base + GATE_HALF_WORDS + row * DOWN_HALF_STRIDE;
+        for (uint pair = lane; pair < DOWN_HALF_STRIDE; pair += 64u) {
+            const vec2 input_pair = vec2(activations.values[pair * 2u], activations.values[pair * 2u + 1u]);
+            const vec2 weight = unpackHalf2x16(experts.values[weight_base + pair]);
+            sum0 += input_pair.x * weight.x;
+            sum1 += input_pair.y * weight.y;
+        }
+    }
+    const float sum = subgroupAdd(sum0 + sum1) * routing.values[params.rank + 2u];
+    if (lane == 0u && row < DIMENSION) output_data.values[row] = params.rank == 0u ? sum : output_data.values[row] + sum;
+}

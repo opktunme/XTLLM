@@ -1,0 +1,39 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } scales;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint rows; uint columns; uint inner; uint packed_stride; } params;
+
+int signed_byte(uint packed, uint byte_index) {
+    int value = int((packed >> (byte_index * 8u)) & 0xffu);
+    return value >= 128 ? value - 256 : value;
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row0 = gl_WorkGroupID.x * 2u;
+    const uint row1 = row0 + 1u;
+    float sum0 = 0.0, sum1 = 0.0;
+    for (uint packed_index = lane; packed_index < params.packed_stride; packed_index += 64u) {
+        const uint k = packed_index * 4u;
+        const uint packed0 = row0 < params.columns ?
+            weights.values[row0 * params.packed_stride + packed_index] : 0u;
+        const uint packed1 = row1 < params.columns ?
+            weights.values[row1 * params.packed_stride + packed_index] : 0u;
+        for (uint byte_index = 0; byte_index < 4u && k + byte_index < params.inner; ++byte_index) {
+            const float value = activations.values[k + byte_index];
+            sum0 += value * float(signed_byte(packed0, byte_index));
+            sum1 += value * float(signed_byte(packed1, byte_index));
+        }
+    }
+    sum0 = subgroupAdd(sum0);
+    sum1 = subgroupAdd(sum1);
+    if (lane == 0u) {
+        if (row0 < params.columns) output_data.values[row0] = sum0 * scales.values[row0];
+        if (row1 < params.columns) output_data.values[row1] = sum1 * scales.values[row1];
+    }
+}

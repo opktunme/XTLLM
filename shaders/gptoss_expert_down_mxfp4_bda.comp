@@ -1,0 +1,84 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { vec4 values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer Control { uint values[]; } control;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(set = 0, binding = 4, std430) readonly buffer Residual { float values[]; } residual;
+layout(push_constant) uniform Params { uvec4 unused; } params;
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer ExpertData {
+    uint values[];
+};
+
+const uint DIMENSION = 2880u;
+const uint HIDDEN = 2880u;
+const uint BLOCKS_PER_ROW = 90u;
+const uint MLP2_BLOCK_U32 = 2206080u;
+const uint MLP2_SCALE_BYTE = 12971520u;
+const uint MLP2_BIAS_BYTE = 13230720u;
+const uint SELECTED_ADDRESS = 512u;
+
+uint64_t selected_address(uint rank) {
+    const uint word = SELECTED_ADDRESS + rank * 2u;
+    return uint64_t(control.values[word]) | (uint64_t(control.values[word + 1u]) << 32u);
+}
+uint load_byte(ExpertData data, uint byte_offset) {
+    const uint word = data.values[byte_offset >> 2u];
+    return (word >> ((byte_offset & 3u) * 8u)) & 255u;
+}
+float load_bf16(ExpertData data, uint byte_offset) {
+    const uint word = data.values[byte_offset >> 2u];
+    return uintBitsToFloat(((word >> ((byte_offset & 2u) * 8u)) & 0xffffu) << 16u);
+}
+uint pack_levels(uvec4 nibble) {
+    const uvec4 magnitude = nibble & uvec4(7u);
+    const uvec4 level = (uvec4(0xc8643210u) >> (magnitude * 4u)) &
+                        uvec4(15u);
+    const ivec4 signed_level = mix(ivec4(level), -ivec4(level),
+        notEqual(nibble & uvec4(8u), uvec4(0u)));
+    const uvec4 value = uvec4(signed_level);
+    return (value.x & 255u) | ((value.y & 255u) << 8u) |
+           ((value.z & 255u) << 16u) | ((value.w & 255u) << 24u);
+}
+float dot_word(ExpertData data, uint word, uint activation_index) {
+    const uint packed = data.values[word];
+    return dot(activations.values[activation_index],
+               unpackSnorm4x8(pack_levels(uvec4(packed, packed >> 4u,
+                                                 packed >> 8u, packed >> 12u)))) +
+           dot(activations.values[activation_index + 1u],
+               unpackSnorm4x8(pack_levels(uvec4(packed >> 16u, packed >> 20u,
+                                                 packed >> 24u, packed >> 28u))));
+}
+float block_dot(ExpertData data, uint row, uint block, uint activation_offset) {
+    const uint word = MLP2_BLOCK_U32 + (row * BLOCKS_PER_ROW + block) * 4u;
+    const uint activation_base = activation_offset + block * 8u;
+    return dot_word(data, word, activation_base) +
+           dot_word(data, word + 1u, activation_base + 2u) +
+           dot_word(data, word + 2u, activation_base + 4u) +
+           dot_word(data, word + 3u, activation_base + 6u);
+}
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    float total = 0.0;
+    for (uint rank = 0u; rank < 4u; ++rank) {
+        ExpertData data = ExpertData(selected_address(rank));
+        float sum = 0.0;
+        if (row < DIMENSION) {
+            for (uint block = lane; block < BLOCKS_PER_ROW; block += 64u)
+                sum += block_dot(data, row, block, rank * (HIDDEN / 4u)) * 63.5 *
+                    uintBitsToFloat(load_byte(data, MLP2_SCALE_BYTE +
+                        row * BLOCKS_PER_ROW + block) << 23u);
+        }
+        sum = subgroupAdd(sum);
+        if (lane == 0u && row < DIMENSION)
+            total += (sum + load_bf16(data, MLP2_BIAS_BYTE + row * 2u)) *
+                     routing.values[4u + rank];
+    }
+    if (lane == 0u && row < DIMENSION)
+        output_data.values[row] = total + residual.values[row];
+}

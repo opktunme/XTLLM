@@ -1,0 +1,68 @@
+#version 450
+
+// Exact ratio-4 overlapping compressor pooling after host computes wkv/wgate.
+// kv/score rows are [token, 2*head_dim]. For output group g, candidates are
+// previous group's first half and current group's second half, matching
+// official overlap_transform. APE is [4, 2*head_dim].
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer KVProjection { float values[]; } kv;
+layout(set = 0, binding = 1, std430) readonly buffer ScoreProjection { float values[]; } score;
+layout(set = 0, binding = 2, std430) readonly buffer APEData { float values[]; } ape;
+layout(set = 0, binding = 3, std430) writeonly buffer CompressedKV { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint group_count;
+    uint token_count;
+    uint head_dim;
+    uint ratio;
+} params;
+
+const uint RATIO = 4u;
+const uint MAX_HEAD_DIM = 512u;
+
+void main() {
+    const uint group = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (group >= params.group_count || params.ratio != RATIO) return;
+    const uint head_dim = min(params.head_dim, MAX_HEAD_DIM);
+    const uint width = head_dim * 2u;
+    for (uint step = 0u; step < 8u; ++step) {
+        const uint d = lane + step * 64u;
+        if (d < head_dim) {
+            float candidate_value[8];
+            float candidate_score[8];
+            for (uint i = 0u; i < 8u; ++i) {
+                candidate_value[i] = 0.0;
+                candidate_score[i] = -3.402823466e+38;
+            }
+            for (uint t = 0u; t < RATIO; ++t) {
+                const uint current_token = group * RATIO + t;
+                if (current_token < params.token_count) {
+                    const uint component = head_dim + d;
+                    candidate_value[RATIO + t] = kv.values[current_token * width + component];
+                    candidate_score[RATIO + t] = score.values[current_token * width + component] +
+                                                 ape.values[t * width + component];
+                }
+                if (group > 0u) {
+                    const uint previous_token = (group - 1u) * RATIO + t;
+                    if (previous_token < params.token_count) {
+                        candidate_value[t] = kv.values[previous_token * width + d];
+                        candidate_score[t] = score.values[previous_token * width + d] +
+                                             ape.values[t * width + d];
+                    }
+                }
+            }
+            float maximum = -3.402823466e+38;
+            for (uint i = 0u; i < 8u; ++i) maximum = max(maximum, candidate_score[i]);
+            float numerator = 0.0;
+            float denom = 0.0;
+            for (uint i = 0u; i < 8u; ++i) {
+                if (candidate_score[i] > -3.0e+38) {
+                    const float weight = exp(candidate_score[i] - maximum);
+                    numerator += weight * candidate_value[i];
+                    denom += weight;
+                }
+            }
+            output_data.values[group * head_dim + d] = denom > 0.0 ? numerator / denom : 0.0;
+        }
+    }
+}

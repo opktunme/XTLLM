@@ -1,0 +1,18 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Embedding { float v[]; } embedding;
+layout(set=0,binding=1,std430) readonly buffer Previous { float v[]; } previous;
+layout(set=0,binding=2,std430) readonly buffer ENorm { float v[]; } enorm;
+layout(set=0,binding=3,std430) readonly buffer HNorm { float v[]; } hnorm;
+layout(set=0,binding=4,std430) writeonly buffer Concatenated { float v[]; } output_data;
+layout(push_constant) uniform P { uint dimension; uint epsilon_bits; uint unused0; uint unused1; } p;
+
+void main(){
+    uint lane=gl_LocalInvocationID.x;float es=0.0,hs=0.0;
+    for(uint i=lane;i<p.dimension;i+=64u){float e=embedding.v[i],h=previous.v[i];es+=e*e;hs+=h*h;}
+    es=subgroupAdd(es);hs=subgroupAdd(hs);float eps=uintBitsToFloat(p.epsilon_bits);
+    float ei=inversesqrt(es/float(p.dimension)+eps),hi=inversesqrt(hs/float(p.dimension)+eps);
+    for(uint i=lane;i<p.dimension;i+=64u){output_data.v[i]=embedding.v[i]*ei*(enorm.v[i]+1.0);output_data.v[p.dimension+i]=previous.v[i]*hi*(hnorm.v[i]+1.0);}
+}

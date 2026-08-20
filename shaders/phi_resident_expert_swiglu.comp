@@ -1,0 +1,55 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer ExpertBlock { uint values[]; } experts;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint rank; uint unused0; uint unused1; uint unused2; } params;
+
+const uint HIDDEN = 448u;
+const uint GATE_ROWS = 896u;
+const uint GATE_STRIDE = 1024u;
+const uint DOWN_ROWS = 4096u;
+const uint DOWN_STRIDE = 112u;
+const uint GATE_WEIGHT_WORDS = GATE_ROWS * GATE_STRIDE;
+const uint DOWN_WEIGHT_WORDS = DOWN_ROWS * DOWN_STRIDE;
+const uint EXPERT_WORDS = GATE_ROWS + GATE_WEIGHT_WORDS + DOWN_ROWS + DOWN_WEIGHT_WORDS;
+
+int signed_byte(uint packed, uint byte_index) {
+    return bitfieldExtract(int(packed), int(byte_index * 8u), 8);
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    const uint selected = uint(round(routing.values[params.rank]));
+    const uint expert_base = selected * EXPERT_WORDS;
+    float gate0 = 0.0, gate1 = 0.0, gate2 = 0.0, gate3 = 0.0;
+    float up0 = 0.0, up1 = 0.0, up2 = 0.0, up3 = 0.0;
+    if (row < HIDDEN) {
+        const uint gate_base = expert_base + GATE_ROWS + row * GATE_STRIDE;
+        const uint up_base = expert_base + GATE_ROWS + (row + HIDDEN) * GATE_STRIDE;
+        for (uint packed_index = lane; packed_index < GATE_STRIDE; packed_index += 64u) {
+            const uint gate_packed = experts.values[gate_base + packed_index];
+            const uint up_packed = experts.values[up_base + packed_index];
+            const uint k = packed_index * 4u;
+            gate0 += activations.values[k] * float(signed_byte(gate_packed, 0u));
+            gate1 += activations.values[k + 1u] * float(signed_byte(gate_packed, 1u));
+            gate2 += activations.values[k + 2u] * float(signed_byte(gate_packed, 2u));
+            gate3 += activations.values[k + 3u] * float(signed_byte(gate_packed, 3u));
+            up0 += activations.values[k] * float(signed_byte(up_packed, 0u));
+            up1 += activations.values[k + 1u] * float(signed_byte(up_packed, 1u));
+            up2 += activations.values[k + 2u] * float(signed_byte(up_packed, 2u));
+            up3 += activations.values[k + 3u] * float(signed_byte(up_packed, 3u));
+        }
+    }
+    const float gate_sum = subgroupAdd((gate0 + gate1) + (gate2 + gate3));
+    const float up_sum = subgroupAdd((up0 + up1) + (up2 + up3));
+    if (lane == 0u && row < HIDDEN) {
+        const float gate = gate_sum * uintBitsToFloat(experts.values[expert_base + row]);
+        const float up = up_sum * uintBitsToFloat(experts.values[expert_base + row + HIDDEN]);
+        output_data.values[row] = (gate / (1.0 + exp(-gate))) * up;
+    }
+}

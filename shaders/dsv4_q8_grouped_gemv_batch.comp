@@ -1,0 +1,11 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer A{uint v[];}a;
+layout(set=0,binding=1,std430) readonly buffer W{uint v[];}w;
+layout(set=0,binding=2,std430) readonly buffer S{float v[];}s;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];}o;
+layout(push_constant) uniform P{uint groups;uint rows_per_group;uint inner;uint activation_scale_u32;}p;
+void main(){uint lane=gl_LocalInvocationID.x,gy=gl_WorkGroupID.y,g=gy%p.groups,t=gy/p.groups,r0=gl_WorkGroupID.x*8u,ps=(p.inner+3u)>>2u,sb=(p.inner+127u)>>7u,ab=t*p.groups*ps+g*ps,asb=p.activation_scale_u32+t*p.groups*sb+g*sb;float q[8]=float[8](0,0,0,0,0,0,0,0);for(uint word=lane;word<ps;word+=64u){int av=int(a.v[ab+word]);float sc=uintBitsToFloat(a.v[asb+word/32u]);for(uint r=0u;r<8u;++r){uint lr=r0+r;if(lr<p.rows_per_group){uint row=g*p.rows_per_group+lr;q[r]+=float(dotPacked4x8EXT(av,int(w.v[row*ps+word])))*sc;}}}for(uint r=0u;r<8u;++r)q[r]=subgroupAdd(q[r]);if(lane==0u)for(uint r=0u;r<8u;++r){uint lr=r0+r;if(lr<p.rows_per_group){uint row=g*p.rows_per_group+lr;o.v[t*p.groups*p.rows_per_group+row]=q[r]*s.v[row];}}}

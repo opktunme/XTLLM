@@ -1,0 +1,76 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// One Y workgroup per independent activation/matrix group (wo_a uses 8).
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer HalfWeightScales { uint values[]; } weight_scales;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint groups;
+    uint rows_per_group;
+    uint inner;
+    uint activation_scale_u32;
+} params;
+
+uint signed_nibbles(uint n) {
+    uint b = (n & 0x000fu) | ((n & 0x00f0u) << 4u) |
+             ((n & 0x0f00u) << 8u) | ((n & 0xf000u) << 12u);
+    const uint s = b & 0x08080808u;
+    return b | (s << 1u) | (s << 2u) | (s << 3u) | (s << 4u);
+}
+float load_weight_scale(uint half_index) {
+    const vec2 pair = unpackHalf2x16(weight_scales.values[half_index >> 1u]);
+    return (half_index & 1u) == 0u ? pair.x : pair.y;
+}
+int q4_dot(uint weight_base, uint activation_base) {
+    int sum = 0;
+    for (uint i = 0u; i < 8u; ++i) {
+        const uint packed = weights.values[weight_base + i];
+        sum += dotPacked4x8EXT(int(activations.values[activation_base + i * 2u]),
+                              int(signed_nibbles(packed & 0xffffu)));
+        sum += dotPacked4x8EXT(int(activations.values[activation_base + i * 2u + 1u]),
+                              int(signed_nibbles(packed >> 16u)));
+    }
+    return sum;
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint matrix_group = gl_WorkGroupID.y;
+    if (matrix_group >= params.groups) return;
+    const uint first_local_row = gl_WorkGroupID.x * 8u;
+    const uint blocks = params.inner >> 6u;
+    const uint activation_words = params.inner >> 2u;
+    const uint weight_words_per_row = params.inner >> 3u;
+    const uint activation_scale_blocks = params.inner >> 7u;
+    float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (uint block = lane; block < blocks; block += 64u) {
+        const float activation_scale = uintBitsToFloat(activations.values[
+            params.activation_scale_u32 + matrix_group * activation_scale_blocks +
+            (block >> 1u)]);
+        const uint activation_base = matrix_group * activation_words + block * 16u;
+        for (uint r = 0u; r < 8u; ++r) {
+            const uint local_row = first_local_row + r;
+            if (local_row < params.rows_per_group) {
+                const uint row = matrix_group * params.rows_per_group + local_row;
+                const float weight_scale = load_weight_scale(row * blocks + block);
+                sums[r] += float(q4_dot(row * weight_words_per_row + block * 8u,
+                                        activation_base)) *
+                           (activation_scale * weight_scale);
+            }
+        }
+    }
+    for (uint r = 0u; r < 8u; ++r) sums[r] = subgroupAdd(sums[r]);
+    if (lane == 0u) {
+        for (uint r = 0u; r < 8u; ++r) {
+            const uint local_row = first_local_row + r;
+            if (local_row < params.rows_per_group) {
+                const uint row = matrix_group * params.rows_per_group + local_row;
+                output_data.values[row] = sums[r];
+            }
+        }
+    }
+}

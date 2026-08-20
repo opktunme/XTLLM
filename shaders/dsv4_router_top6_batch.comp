@@ -1,0 +1,11 @@
+#version 450
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer L{float v[];}logits;
+layout(set=0,binding=1,std430) readonly buffer B{float v[];}bias;
+layout(set=0,binding=2,std430) readonly buffer D{uint v[];}dummy;
+layout(set=0,binding=3,std430) writeonly buffer R{uint v[];}routing;
+layout(push_constant) uniform P{uint experts;uint top_k;uint route_scale_bits;uint batch;}p;
+shared float raw[256];shared float sel[256];
+float score(float x){float z=max(x,0.0)+log(1.0+exp(-abs(x)));return sqrt(max(z,0.0));}
+void main(){uint lane=gl_LocalInvocationID.x,t=gl_WorkGroupID.x;if(t>=p.batch)return;for(uint s=0u;s<4u;++s){uint e=lane+s*64u;if(e<p.experts){float x=score(logits.v[t*p.experts+e]);raw[e]=x;sel[e]=x+bias.v[e];}}barrier();if(lane==0u){uint ids[6];float ws[6];float den=0.0;for(uint r=0u;r<6u;++r){float best=-3.402823466e+38;uint id=0u;for(uint e=0u;e<p.experts;++e){bool used=false;for(uint j=0u;j<r;++j)used=used||ids[j]==e;if(!used&&sel[e]>best){best=sel[e];id=e;}}ids[r]=id;ws[r]=raw[id];den+=ws[r];}uint base=t*64u;float rs=uintBitsToFloat(p.route_scale_bits);for(uint r=0u;r<6u;++r){routing.v[base+r]=ids[r];routing.v[base+6u+r]=floatBitsToUint(den>0.0?ws[r]/den*rs:0.0);}}}

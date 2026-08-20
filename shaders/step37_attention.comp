@@ -1,0 +1,32 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Query { float v[]; } query;
+layout(set=0,binding=1,std430) readonly buffer KVCache { float v[]; } cache;
+layout(set=0,binding=2,std430) writeonly buffer Context { float v[]; } context;
+layout(set=0,binding=3,std430) readonly buffer Dummy { uint v; } dummy;
+layout(push_constant) uniform P { uint layer; uint position; uint heads; uint window; } p;
+
+const uint HEAD_DIM=128u;const uint KV_HEADS=8u;const uint MAX_CONTEXT=2048u;
+shared float scores[MAX_CONTEXT];
+
+void main(){
+    uint lane=gl_LocalInvocationID.x,head=gl_WorkGroupID.x;if(head>=p.heads)return;
+    uint first=(p.window>0u && p.position+1u>p.window)?p.position+1u-p.window:0u;
+    uint count=p.position+1u-first;uint kv=head/(p.heads/KV_HEADS);
+    uint lb=p.layer*2u*MAX_CONTEXT*KV_HEADS*HEAD_DIM;
+    float maximum=-3.402823466e+38;
+    for(uint t=0u;t<count;++t){float dot=0.0;uint pos=first+t;
+        for(uint s=0u;s<2u;++s){uint d=lane+s*64u;dot+=query.v[head*HEAD_DIM+d]*cache.v[lb+(pos*KV_HEADS+kv)*HEAD_DIM+d];}
+        dot=subgroupAdd(dot)*0.0883883476483;if(lane==0u)scores[t]=dot;maximum=max(maximum,dot);
+    }
+    maximum=subgroupMax(maximum);barrier();float denom=0.0;
+    for(uint t=0u;t<count;++t)denom+=exp(scores[t]-maximum);
+    float out0=0.0,out1=0.0;
+    for(uint t=0u;t<count;++t){float w=exp(scores[t]-maximum)/denom;uint pos=first+t;
+        out0+=w*cache.v[lb+MAX_CONTEXT*KV_HEADS*HEAD_DIM+(pos*KV_HEADS+kv)*HEAD_DIM+lane];
+        out1+=w*cache.v[lb+MAX_CONTEXT*KV_HEADS*HEAD_DIM+(pos*KV_HEADS+kv)*HEAD_DIM+lane+64u];
+    }
+    context.v[head*HEAD_DIM+lane]=out0;context.v[head*HEAD_DIM+lane+64u]=out1;
+}

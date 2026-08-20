@@ -1,0 +1,44 @@
+#version 450
+
+layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Partial { float v[]; } partial;
+layout(set=0,binding=1,std430) writeonly buffer Context { float v[]; } context;
+layout(set=0,binding=2,std430) readonly buffer DummyA { uint v; } a;
+layout(set=0,binding=3,std430) readonly buffer DummyB { uint v; } b;
+layout(push_constant) uniform P {
+    uint chunks;
+    uint heads;
+    uint unused0;
+    uint unused1;
+} p;
+
+const uint HEAD_DIM = 256u;
+const uint PARTIAL_STRIDE = HEAD_DIM + 2u;
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    if (head >= p.heads) return;
+    float maximum = -3.402823466e+38;
+    float denominator = 0.0;
+    float output0 = 0.0, output1 = 0.0, output2 = 0.0, output3 = 0.0;
+    for (uint chunk = 0u; chunk < p.chunks; ++chunk) {
+        uint base = (chunk * p.heads + head) * PARTIAL_STRIDE;
+        float part_maximum = partial.v[base];
+        float part_denominator = partial.v[base + 1u];
+        float next_maximum = max(maximum, part_maximum);
+        float old_scale = exp(maximum - next_maximum);
+        float part_scale = exp(part_maximum - next_maximum);
+        denominator = denominator * old_scale + part_denominator * part_scale;
+        output0 = output0 * old_scale + partial.v[base + 2u + lane] * part_scale;
+        output1 = output1 * old_scale + partial.v[base + 2u + lane + 64u] * part_scale;
+        output2 = output2 * old_scale + partial.v[base + 2u + lane + 128u] * part_scale;
+        output3 = output3 * old_scale + partial.v[base + 2u + lane + 192u] * part_scale;
+        maximum = next_maximum;
+    }
+    float inv = 1.0 / denominator;
+    context.v[head * HEAD_DIM + lane] = output0 * inv;
+    context.v[head * HEAD_DIM + lane + 64u] = output1 * inv;
+    context.v[head * HEAD_DIM + lane + 128u] = output2 * inv;
+    context.v[head * HEAD_DIM + lane + 192u] = output3 * inv;
+}

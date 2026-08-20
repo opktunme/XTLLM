@@ -1,0 +1,36 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer ExpertBlock { uint values[]; } experts;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint unused0; uint unused1; uint unused2; uint unused3; } params;
+
+const uint HIDDEN=448u,GATE_ROWS=896u,GATE_STRIDE=1024u,DOWN_ROWS=4096u,DOWN_STRIDE=112u;
+const uint DOWN_BASE=GATE_ROWS+GATE_ROWS*GATE_STRIDE;
+const uint EXPERT_WORDS=DOWN_BASE+DOWN_ROWS+DOWN_ROWS*DOWN_STRIDE;
+
+void main(){
+    const uint lane=gl_LocalInvocationID.x,row=gl_WorkGroupID.x*4u+gl_LocalInvocationID.y;
+    const uint expert0=uint(round(routing.values[0]))*EXPERT_WORDS;
+    const uint expert1=uint(round(routing.values[1]))*EXPERT_WORDS;
+    float sum0=0.0,sum1=0.0;
+    if(row<DOWN_ROWS){
+        const uint base0=expert0+DOWN_BASE+DOWN_ROWS+row*DOWN_STRIDE;
+        const uint base1=expert1+DOWN_BASE+DOWN_ROWS+row*DOWN_STRIDE;
+        for(uint p=lane;p<DOWN_STRIDE;p+=64u){
+            const uint k=p*4u;
+            const vec4 a=vec4(activations.values[k],activations.values[k+1u],activations.values[k+2u],activations.values[k+3u]);
+            const vec4 b=vec4(activations.values[HIDDEN+k],activations.values[HIDDEN+k+1u],activations.values[HIDDEN+k+2u],activations.values[HIDDEN+k+3u]);
+            sum0+=dot(a,unpackSnorm4x8(experts.values[base0+p]));
+            sum1+=dot(b,unpackSnorm4x8(experts.values[base1+p]));
+        }
+    }
+    sum0=subgroupAdd(sum0);sum1=subgroupAdd(sum1);
+    if(lane==0u&&row<DOWN_ROWS){
+        output_data.values[row]=sum0*(127.0*uintBitsToFloat(experts.values[expert0+DOWN_BASE+row]))*routing.values[2]+
+                                sum1*(127.0*uintBitsToFloat(experts.values[expert1+DOWN_BASE+row]))*routing.values[3];
+    }
+}

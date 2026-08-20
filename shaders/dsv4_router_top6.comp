@@ -1,0 +1,80 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer RouterLogits { float values[]; } logits;
+layout(set = 0, binding = 1, std430) readonly buffer RouterBias { float values[]; } bias;
+layout(set = 0, binding = 2, std430) readonly buffer TokenToExpert { uint values[]; } tid2eid;
+// uint[0..5] indices, uint[6..11] floatBits routing weights.
+layout(set = 0, binding = 3, std430) writeonly buffer RoutingData { uint values[]; } routing;
+layout(push_constant) uniform Params {
+    uint experts;
+    uint top_k;
+    uint route_scale_bits;
+    uint token_flags;
+} params;
+
+const uint MAX_EXPERTS = 256u;
+const uint MAX_TOP_K = 6u;
+shared float raw_scores[MAX_EXPERTS];
+shared float select_scores[MAX_EXPERTS];
+
+float sqrt_softplus(float x) {
+    const float softplus = max(x, 0.0) + log(1.0 + exp(-abs(x)));
+    return sqrt(max(softplus, 0.0));
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint experts = min(params.experts, MAX_EXPERTS);
+    const bool hash_route = (params.token_flags & 0x80000000u) != 0u;
+    for (uint slot = 0u; slot < 4u; ++slot) {
+        const uint expert = lane + slot * 64u;
+        if (expert < experts) {
+            const float raw = sqrt_softplus(logits.values[expert]);
+            raw_scores[expert] = raw;
+            select_scores[expert] = raw + (hash_route ? 0.0 : bias.values[expert]);
+        }
+    }
+    barrier();
+    if (lane == 0u) {
+        const uint k = min(params.top_k, MAX_TOP_K);
+        uint selected[MAX_TOP_K];
+        float selected_weight[MAX_TOP_K];
+        float denominator = 0.0;
+        const uint token = params.token_flags & 0x7fffffffu;
+        for (uint rank = 0u; rank < MAX_TOP_K; ++rank) {
+            uint best_index = 0u;
+            if (rank < k) {
+                if (hash_route) {
+                    best_index = tid2eid.values[token * k + rank];
+                } else {
+                    float best = -3.402823466e+38;
+                    for (uint expert = 0u; expert < MAX_EXPERTS; ++expert) {
+                        if (expert < experts) {
+                            bool used = false;
+                            for (uint prior = 0u; prior < MAX_TOP_K; ++prior)
+                                if (prior < rank) used = used || selected[prior] == expert;
+                            if (!used && select_scores[expert] > best) {
+                                best = select_scores[expert];
+                                best_index = expert;
+                            }
+                        }
+                    }
+                }
+                selected[rank] = best_index;
+                selected_weight[rank] = best_index < experts ? raw_scores[best_index] : 0.0;
+                denominator += selected_weight[rank];
+            } else {
+                selected[rank] = 0u;
+                selected_weight[rank] = 0.0;
+            }
+        }
+        const float route_scale = uintBitsToFloat(params.route_scale_bits);
+        for (uint rank = 0u; rank < MAX_TOP_K; ++rank) {
+            routing.values[rank] = selected[rank];
+            const float weight = rank < k && denominator > 0.0 ?
+                selected_weight[rank] / denominator * route_scale : 0.0;
+            routing.values[MAX_TOP_K + rank] = floatBitsToUint(weight);
+        }
+    }
+}

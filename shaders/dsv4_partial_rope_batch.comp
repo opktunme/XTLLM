@@ -1,0 +1,9 @@
+#version 450
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer I{float v[];}input_data;
+layout(set=0,binding=1,std430) readonly buffer C{float v[];}cosines;
+layout(set=0,binding=2,std430) readonly buffer S{float v[];}sines;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];}output_data;
+layout(push_constant) uniform P{uint rows;uint head_dim;uint rope_dim;uint position_flags;}p;
+void main(){uint linear=gl_GlobalInvocationID.x,per=p.rows*p.head_dim,t=gl_WorkGroupID.y,row=linear/p.head_dim,d=linear-row*p.head_dim;if(row>=p.rows||d>=p.head_dim)return;uint pos=(p.position_flags&0x3fffffffu)+t;bool inv=(p.position_flags&0x80000000u)!=0u;uint base=(t*p.rows+row)*p.head_dim;float value=input_data.v[base+d];uint start=p.head_dim-p.rope_dim;if(d>=start){uint local=d-start,pair=local>>1u,other=(local&1u)==0u?d+1u:d-1u;float x=input_data.v[base+d],y=input_data.v[base+other],c=cosines.v[pos*(p.rope_dim>>1u)+pair],s=sines.v[pos*(p.rope_dim>>1u)+pair];if(inv)s=-s;value=(local&1u)==0u?x*c-y*s:x*c+y*s;}output_data.v[base+d]=value;}

@@ -1,0 +1,39 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer Gamma { float values[]; } gamma_data;
+layout(set = 0, binding = 2, std430) writeonly buffer OutputData { float values[]; } output_data;
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint columns;
+    float epsilon;
+    uint unused;
+} params;
+
+shared float partial_sums[64];
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    float square_sum = 0.0;
+    for (uint column = lane; column < params.columns; column += 64) {
+        const float value = input_data.values[row * params.columns + column];
+        square_sum += value * value;
+    }
+    partial_sums[lane] = square_sum;
+    barrier();
+
+    for (uint stride = 32; stride > 0; stride >>= 1) {
+        if (lane < stride) partial_sums[lane] += partial_sums[lane + stride];
+        barrier();
+    }
+
+    const float inverse_rms = inversesqrt(partial_sums[0] / float(params.columns) + params.epsilon);
+    for (uint column = lane; column < params.columns; column += 64) {
+        output_data.values[row * params.columns + column] =
+            input_data.values[row * params.columns + column] * inverse_rms * gamma_data.values[column];
+    }
+}

@@ -1,0 +1,44 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64, local_size_y=8, local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer QueryGate { float v[]; } query_gate;
+layout(set=0,binding=1,std430) readonly buffer KVCache { uint v[]; } cache;
+layout(set=0,binding=2,std430) readonly buffer Blocks { uint v[]; } block_indices;
+layout(set=0,binding=3,std430) writeonly buffer Partial { float v[]; } partial;
+layout(push_constant) uniform P { uint position; uint max_context; uint block_size; uint selected; } p;
+
+const uint HEAD_DIM=256u, KV_HEADS=2u, QUERY_HEADS=32u, PARTIAL_STRIDE=258u;
+shared float tile_k[HEAD_DIM]; shared float tile_v[HEAD_DIM];
+float from_bf16(uint bits){return uintBitsToFloat(bits<<16u);}
+
+void main(){
+    uint lane=gl_LocalInvocationID.x,local_head=gl_LocalInvocationID.y;
+    uint selection=gl_WorkGroupID.x/KV_HEADS,kv=gl_WorkGroupID.x%KV_HEADS;
+    if(selection>=p.selected)return;
+    uint block=block_indices.v[kv*64u+selection];
+    uint begin=block*p.block_size,end=min(min(begin+p.block_size,p.position+1u),p.max_context);
+    const uint pairs=HEAD_DIM/2u,value_base=p.max_context*KV_HEADS*pairs;
+    float maximum[2],denominator[2],o0[2],o1[2],o2[2],o3[2];
+    for(uint h=0u;h<2u;++h){maximum[h]=-3.402823466e+38;denominator[h]=0.0;
+        o0[h]=0.0;o1[h]=0.0;o2[h]=0.0;o3[h]=0.0;}
+    for(uint t=begin;t<end;++t){
+        if(local_head==0u)for(uint s=0u;s<2u;++s){uint pair=lane+s*64u;uint packed=cache.v[(t*KV_HEADS+kv)*pairs+pair];
+            tile_k[pair*2u]=from_bf16(packed&0xffffu);tile_k[pair*2u+1u]=from_bf16(packed>>16u);}
+        else if(local_head==1u)for(uint s=0u;s<2u;++s){uint pair=lane+s*64u;uint packed=cache.v[value_base+(t*KV_HEADS+kv)*pairs+pair];
+            tile_v[pair*2u]=from_bf16(packed&0xffffu);tile_v[pair*2u+1u]=from_bf16(packed>>16u);}
+        barrier();
+        for(uint h=0u;h<2u;++h){uint head=kv*16u+local_head+h*8u;
+            float dotv=query_gate.v[head*512u+lane]*tile_k[lane]+query_gate.v[head*512u+lane+64u]*tile_k[lane+64u]
+                +query_gate.v[head*512u+lane+128u]*tile_k[lane+128u]+query_gate.v[head*512u+lane+192u]*tile_k[lane+192u];
+            float score=subgroupAdd(dotv)*0.0625,next=max(maximum[h],score),os=exp(maximum[h]-next),ns=exp(score-next);
+            denominator[h]=denominator[h]*os+ns;o0[h]=o0[h]*os+ns*tile_v[lane];
+            o1[h]=o1[h]*os+ns*tile_v[lane+64u];o2[h]=o2[h]*os+ns*tile_v[lane+128u];
+            o3[h]=o3[h]*os+ns*tile_v[lane+192u];maximum[h]=next;}
+        barrier();
+    }
+    for(uint h=0u;h<2u;++h){uint head=kv*16u+local_head+h*8u,base=(selection*QUERY_HEADS+head)*PARTIAL_STRIDE;
+        if(lane==0u){partial.v[base]=maximum[h];partial.v[base+1u]=denominator[h];}
+        partial.v[base+2u+lane]=o0[h];partial.v[base+66u+lane]=o1[h];
+        partial.v[base+130u+lane]=o2[h];partial.v[base+194u+lane]=o3[h];}
+}

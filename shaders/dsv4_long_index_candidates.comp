@@ -1,0 +1,15 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=8,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Queries{uint v[];} queries;
+layout(set=0,binding=1,std430) readonly buffer IndexKV{uint v[];} keys;
+layout(set=0,binding=2,std430) readonly buffer HeadWeights{float v[];} weights;
+layout(set=0,binding=3,std430) readonly buffer Blocks{uint v[];} blocks;
+layout(set=0,binding=4,std430) writeonly buffer Scores{float v[];} scores;
+layout(set=0,binding=5,std430) writeonly buffer Positions{uint v[];} positions;
+layout(push_constant) uniform P{uint count;uint block_size;uint selected_blocks;uint available;} p;
+int fp4i(uint n){uint c=n&7u;int v=c==0u?0:c==1u?1:c==2u?2:c==3u?3:c==4u?4:c==5u?6:c==6u?8:12;return(n&8u)!=0u?-v:v;}
+uint s4(uint w,uint f){uint z=0u;for(uint i=0u;i<4u;++i)z|=(uint(fp4i((w>>((f+i)*4u))&15u))&255u)<<(i*8u);return z;}
+float score_key(uint qbase,uint kbase,uint qexp,uint kexp){float dotv=0.0;for(uint g=0u;g<4u;++g){int sum=0;for(uint w=0u;w<4u;++w){uint qw=queries.v[qbase+g*4u+w],kw=keys.v[kbase+g*4u+w];sum+=dotPacked4x8EXT(int(s4(qw,0u)),int(s4(kw,0u)))+dotPacked4x8EXT(int(s4(qw,4u)),int(s4(kw,4u)));}float qs=uintBitsToFloat(((qexp>>(g*8u))&255u)<<23u),ks=uintBitsToFloat(((kexp>>(g*8u))&255u)<<23u);dotv+=float(sum)*0.25*qs*ks;}return dotv;}
+void main(){uint item=gl_WorkGroupID.x*8u+gl_LocalInvocationID.y,head=gl_LocalInvocationID.x;if(item>=p.count)return;uint block=blocks.v[item/p.block_size],pos=block*p.block_size+item%p.block_size;bool valid=pos<p.available;const uint stride=17u;float total=-3.402823466e+38;if(valid){uint qbase=head*stride,kbase=pos*stride,qexp=queries.v[qbase+16u],kexp=keys.v[kbase+16u];float contribution=max(score_key(qbase,kbase,qexp,kexp),0.0)*weights.v[head];total=subgroupAdd(contribution);}if(head==0u){scores.v[item]=total;positions.v[item]=valid?pos:0xffffffffu;}}

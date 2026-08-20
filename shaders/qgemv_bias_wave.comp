@@ -1,0 +1,36 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+// Row scales followed immediately by row biases.
+layout(set = 0, binding = 2, std430) readonly buffer ScaleBias { float values[]; } scale_bias;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint rows; uint columns; uint inner; uint packed_stride; } params;
+
+int signed_byte(uint packed, uint byte_index) {
+    return bitfieldExtract(int(packed), int(byte_index * 8u), 8);
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    float sum0 = 0.0, sum1 = 0.0, sum2 = 0.0, sum3 = 0.0;
+    if (row < params.columns) {
+        const uint weight_base = row * params.packed_stride;
+        for (uint packed_index = lane; packed_index < params.packed_stride; packed_index += 64u) {
+            const uint packed = weights.values[weight_base + packed_index];
+            const uint k = packed_index * 4u;
+            if (k < params.inner) sum0 += activations.values[k] * float(signed_byte(packed, 0u));
+            if (k + 1u < params.inner) sum1 += activations.values[k + 1u] * float(signed_byte(packed, 1u));
+            if (k + 2u < params.inner) sum2 += activations.values[k + 2u] * float(signed_byte(packed, 2u));
+            if (k + 3u < params.inner) sum3 += activations.values[k + 3u] * float(signed_byte(packed, 3u));
+        }
+    }
+    float sum = subgroupAdd((sum0 + sum1) + (sum2 + sum3));
+    if (lane == 0u && row < params.columns) {
+        output_data.values[row] = sum * scale_bias.values[row] +
+                                  scale_bias.values[params.columns + row];
+    }
+}

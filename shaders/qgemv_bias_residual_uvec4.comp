@@ -1,0 +1,24 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=4,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Activations{vec4 values[];}activations;
+layout(set=0,binding=1,std430) readonly buffer PackedWeights{uvec4 values[];}weights;
+layout(set=0,binding=2,std430) readonly buffer ScaleBias{float values[];}scale_bias;
+layout(set=0,binding=3,std430) buffer HiddenState{float values[];}hidden;
+layout(push_constant) uniform Params{uint rows;uint columns;uint inner;uint packed_stride;}params;
+
+void main(){
+ const uint lane=gl_LocalInvocationID.x,row=gl_WorkGroupID.x*4u+gl_LocalInvocationID.y;
+ const uint vector_stride=params.packed_stride/4u;float s0=0.0,s1=0.0,s2=0.0,s3=0.0;
+ if(row<params.columns){
+  const uint base=row*vector_stride;
+  for(uint v=lane;v<vector_stride;v+=64u){
+   const uvec4 w=weights.values[base+v];const uint p=v*4u;
+   s0+=dot(activations.values[p],unpackSnorm4x8(w.x));s1+=dot(activations.values[p+1u],unpackSnorm4x8(w.y));
+   s2+=dot(activations.values[p+2u],unpackSnorm4x8(w.z));s3+=dot(activations.values[p+3u],unpackSnorm4x8(w.w));
+  }
+ }
+ const float sum=subgroupAdd((s0+s1)+(s2+s3));
+ if(lane==0u&&row<params.columns)hidden.values[row]+=sum*(127.0*scale_bias.values[row])+scale_bias.values[params.columns+row];
+}

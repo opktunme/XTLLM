@@ -1,0 +1,150 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Incremental official gated compressor. State contains [2*ratio,width] KV
+// followed by scores. flags bit0=overlap, bit1=indexer Hadamard+FP4 simulation.
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer KVProjection{float v[];} kv_in;
+layout(set=0,binding=1,std430) readonly buffer ScoreProjection{float v[];} score_in;
+layout(set=0,binding=2,std430) readonly buffer APE{float v[];} ape;
+layout(set=0,binding=3,std430) readonly buffer Gamma{float v[];} gamma_data;
+layout(set=0,binding=4,std430) buffer State{float v[];} state;
+layout(set=0,binding=5,std430) buffer OutputBF16{uint v[];} output_data;
+layout(push_constant) uniform P{uint position;uint ratio;uint head_dim;uint flags;} p;
+
+shared float pooled[512];
+shared float alternate[512];
+shared float fp4_scale[16];
+
+uint bf16(float x){uint u=floatBitsToUint(x);u+=0x7fffu+((u>>16u)&1u);return u>>16u;}
+
+float rope_frequency(uint frequency){
+    const float base=160000.0,pi=3.14159265358979323846;
+    float value=1.0/pow(base,float(frequency*2u)/64.0);
+    float low=max(floor(64.0*log(65536.0/(32.0*2.0*pi))/(2.0*log(base))),0.0);
+    float high=min(ceil(64.0*log(65536.0/(2.0*pi))/(2.0*log(base))),63.0);
+    if(low==high)high+=0.001;
+    float blend=1.0-clamp((float(frequency)-low)/(high-low),0.0,1.0);
+    return value/16.0*(1.0-blend)+value*blend;
+}
+
+float fp4_sim(float x,float scale){
+    if(scale<=0.0)return 0.0;
+    float a=abs(x/scale),q;
+    if(a<0.25)q=0.0; else if(a<0.75)q=0.5; else if(a<1.25)q=1.0;
+    else if(a<1.75)q=1.5; else if(a<2.5)q=2.0; else if(a<3.5)q=3.0;
+    else if(a<5.0)q=4.0; else q=6.0;
+    return (x<0.0?-q:q)*scale;
+}
+
+uint fp4_code(float x,float scale){
+    if(scale<=0.0)return 0u;
+    float a=abs(x/scale);
+    uint magnitude;
+    if(a<0.25)magnitude=0u;else if(a<0.75)magnitude=1u;
+    else if(a<1.25)magnitude=2u;else if(a<1.75)magnitude=3u;
+    else if(a<2.5)magnitude=4u;else if(a<3.5)magnitude=5u;
+    else if(a<5.0)magnitude=6u;else magnitude=7u;
+    return magnitude|((x<0.0&&magnitude!=0u)?8u:0u);
+}
+
+void main(){
+    uint lane=gl_LocalInvocationID.x;
+    uint overlap=p.flags&1u, rotate=(p.flags>>1u)&1u;
+    uint coff=1u+overlap,width=coff*p.head_dim,state_rows=coff*p.ratio;
+    uint t=p.position%p.ratio,current=(overlap!=0u?p.ratio:0u)+t;
+    uint score_base=state_rows*width;
+    for(uint d=lane;d<width;d+=64u){
+        state.v[current*width+d]=kv_in.v[d];
+        state.v[score_base+current*width+d]=score_in.v[d]+ape.v[t*width+d];
+    }
+    barrier();
+    if((p.position+1u)%p.ratio!=0u)return;
+    for(uint d=lane;d<p.head_dim;d+=64u){
+        float maximum=-3.402823466e+38;
+        for(uint i=0u;i<p.ratio;++i){
+            uint row=i,component=d;
+            if(overlap!=0u){
+                // Previous group's first half and current group's second half.
+                maximum=max(maximum,state.v[score_base+row*width+component]);
+                maximum=max(maximum,state.v[score_base+(p.ratio+i)*width+p.head_dim+d]);
+            }else maximum=max(maximum,state.v[score_base+row*width+component]);
+        }
+        float numerator=0.0,denom=0.0;
+        for(uint i=0u;i<p.ratio;++i){
+            if(overlap!=0u){
+                float s0=state.v[score_base+i*width+d],w0=exp(s0-maximum);
+                float s1=state.v[score_base+(p.ratio+i)*width+p.head_dim+d],w1=exp(s1-maximum);
+                numerator+=state.v[i*width+d]*w0+state.v[(p.ratio+i)*width+p.head_dim+d]*w1;
+                denom+=w0+w1;
+            }else{
+                float s=state.v[score_base+i*width+d],w=exp(s-maximum);
+                numerator+=state.v[i*width+d]*w;denom+=w;
+            }
+        }
+        pooled[d]=numerator/max(denom,1e-30);
+    }
+    barrier();
+    float ss=0.0;for(uint d=lane;d<p.head_dim;d+=64u)ss+=pooled[d]*pooled[d];
+    ss=subgroupAdd(ss);float inv=inversesqrt(ss/float(p.head_dim)+1e-6);
+    for(uint d=lane;d<p.head_dim;d+=64u)pooled[d]*=inv*gamma_data.v[d];
+    barrier();
+    for(uint d=lane;d<p.head_dim;d+=64u)if(d+64u>=p.head_dim){
+        uint ro=d-(p.head_dim-64u),pair=(p.head_dim-64u)+(ro^1u),f=ro>>1u;
+        float x=pooled[d],y=pooled[pair];
+        float angle=float(p.position+1u-p.ratio)*rope_frequency(f),co=cos(angle),si=sin(angle);
+        alternate[d]=(ro&1u)==0u?x*co-y*si:x*co+y*si;
+    }else alternate[d]=pooled[d];
+    barrier();
+    for(uint d=lane;d<p.head_dim;d+=64u)pooled[d]=alternate[d];
+    barrier();
+    if(rotate!=0u){
+        for(uint step=1u;step<p.head_dim;step<<=1u){
+            for(uint pair=lane;pair<p.head_dim/2u;pair+=64u){
+                uint block=pair/step,within=pair%step,i=block*(step*2u)+within,j=i+step;
+                float x=pooled[i],y=pooled[j];alternate[i]=x+y;alternate[j]=x-y;
+            }
+            barrier();
+            for(uint d=lane;d<p.head_dim;d+=64u)pooled[d]=alternate[d];
+            barrier();
+        }
+        float norm=inversesqrt(float(p.head_dim));
+        for(uint d=lane;d<p.head_dim;d+=64u)pooled[d]*=norm;
+        barrier();
+        if(lane<p.head_dim/32u){
+            uint begin=lane*32u;float amax=0.0;
+            for(uint i=0u;i<32u;++i)amax=max(amax,abs(pooled[begin+i]));
+            float scale=amax>0.0?exp2(ceil(log2(max(amax/6.0,1.17549435e-38)))):1.0;
+            fp4_scale[lane]=scale;
+            for(uint i=0u;i<32u;++i)pooled[begin+i]=fp4_sim(pooled[begin+i],scale);
+        }
+        barrier();
+    }
+    uint output_index=p.position/p.ratio;
+    if(rotate!=0u){
+        // Index keys are already FP4-simulated above. Store the exact E2M1
+        // codes and the four power-of-two scale exponents instead of expanding
+        // them to BF16. A 128-wide key is 17 u32 (68 bytes) rather than 256.
+        const uint stride=17u;
+        for(uint word=lane;word<16u;word+=64u){
+            uint packed=0u;
+            for(uint item=0u;item<8u;++item){
+                uint d=word*8u+item;
+                packed|=fp4_code(pooled[d],fp4_scale[d/32u])<<(item*4u);
+            }
+            output_data.v[output_index*stride+word]=packed;
+        }
+        if(lane==0u){
+            uint exponents=0u;
+            for(uint block=0u;block<4u;++block)
+                exponents|=((floatBitsToUint(fp4_scale[block])>>23u)&0xffu)<<(block*8u);
+            output_data.v[output_index*stride+16u]=exponents;
+        }
+    }else for(uint pair=lane;pair<p.head_dim/2u;pair+=64u)
+        output_data.v[output_index*(p.head_dim/2u)+pair]=bf16(pooled[pair*2u])|(bf16(pooled[pair*2u+1u])<<16u);
+    barrier();
+    if(overlap!=0u)for(uint d=lane;d<p.ratio*width;d+=64u){
+        state.v[d]=state.v[p.ratio*width+d];
+        state.v[score_base+d]=state.v[score_base+p.ratio*width+d];
+    }
+}

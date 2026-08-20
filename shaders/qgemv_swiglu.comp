@@ -1,0 +1,62 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } scales;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint columns;
+    uint inner;
+    uint packed_stride;
+} params;
+
+int signed_byte(uint packed, uint byte_index) {
+    return bitfieldExtract(int(packed), int(byte_index * 8u), 8);
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    float gate0 = 0.0, gate1 = 0.0, gate2 = 0.0, gate3 = 0.0;
+    float up0 = 0.0, up1 = 0.0, up2 = 0.0, up3 = 0.0;
+    if (row < params.columns) {
+        const uint gate_base = row * params.packed_stride;
+        const uint up_base = (row + params.columns) * params.packed_stride;
+        for (uint packed_index = lane; packed_index < params.packed_stride; packed_index += 64u) {
+            const uint gate_packed = weights.values[gate_base + packed_index];
+            const uint up_packed = weights.values[up_base + packed_index];
+            const uint k = packed_index * 4u;
+            if (k < params.inner) {
+                const float value = activations.values[k];
+                gate0 += value * float(signed_byte(gate_packed, 0u));
+                up0 += value * float(signed_byte(up_packed, 0u));
+            }
+            if (k + 1u < params.inner) {
+                const float value = activations.values[k + 1u];
+                gate1 += value * float(signed_byte(gate_packed, 1u));
+                up1 += value * float(signed_byte(up_packed, 1u));
+            }
+            if (k + 2u < params.inner) {
+                const float value = activations.values[k + 2u];
+                gate2 += value * float(signed_byte(gate_packed, 2u));
+                up2 += value * float(signed_byte(up_packed, 2u));
+            }
+            if (k + 3u < params.inner) {
+                const float value = activations.values[k + 3u];
+                gate3 += value * float(signed_byte(gate_packed, 3u));
+                up3 += value * float(signed_byte(up_packed, 3u));
+            }
+        }
+    }
+    const float gate_sum = subgroupAdd((gate0 + gate1) + (gate2 + gate3));
+    const float up_sum = subgroupAdd((up0 + up1) + (up2 + up3));
+    if (lane == 0u && row < params.columns) {
+        const float gate = gate_sum * scales.values[row];
+        const float up = up_sum * scales.values[row + params.columns];
+        output_data.values[row] = (gate / (1.0 + exp(-gate))) * up;
+    }
+}

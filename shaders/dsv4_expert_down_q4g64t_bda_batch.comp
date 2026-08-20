@@ -1,0 +1,37 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Six routed down projections in one bounded dispatch.  Each rank consumes its
+// existing adjacent [512 packed words, 64 scales] activation slice.
+layout(local_size_x=64,local_size_y=4,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer A{uint v[];} a;
+layout(set=0,binding=1,std430) readonly buffer AddressTable{uint64_t v[];} addresses;
+layout(set=0,binding=2,std430) readonly buffer R{uint v[];} route;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];} out_data;
+layout(push_constant) uniform P{uint rank_unused;uint activation_scale_u32;uint unused0;uint unused1;} p;
+layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer ExpertData{uint v[];};
+
+const uint TOPK=6u,DIM=4096u,GROUPS=32u,WORDS=8u,ACTIVATION_STRIDE=576u;
+const uint W2_WEIGHT=2228224u,W2_SCALE_BYTE=13107200u;
+uint sn(uint n){uint b=(n|(n<<8u))&0x00ff00ffu;b=(b|(b<<4u))&0x0f0f0f0fu;return b|((b&0x08080808u)*31u);}
+int dq(uint w,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sn(w&65535u)))+dotPacked4x8EXT(int(a1),int(sn(w>>16u)));}
+float bf(ExpertData e,uint index){uint x=e.v[(W2_SCALE_BYTE>>2u)+(index>>1u)];uint h=(x>>((index&1u)*16u))&65535u;return uintBitsToFloat(h<<16u);}
+int dotrow(ExpertData e,uint activation_base,uint row,uint group,uint frag){uint wi=frag*4u,base=W2_WEIGHT+row*(GROUPS*WORDS)+wi*GROUPS+group,ab=activation_base+group*16u+wi*2u;return dq(e.v[base],a.v[ab],a.v[ab+1u])+dq(e.v[base+GROUPS],a.v[ab+2u],a.v[ab+3u])+dq(e.v[base+2u*GROUPS],a.v[ab+4u],a.v[ab+5u])+dq(e.v[base+3u*GROUPS],a.v[ab+6u],a.v[ab+7u]);}
+
+void main(){
+    uint rank=gl_WorkGroupID.y;if(rank>=TOPK)return;
+    ExpertData e=ExpertData(addresses.v[rank]);
+    uint activation_base=rank*ACTIVATION_STRIDE;
+    uint lane=gl_LocalInvocationID.x,frag=lane&1u,group=lane>>1u;
+    uint row=gl_WorkGroupID.x*4u+gl_LocalInvocationID.y;
+    float sum=0.0;
+    if(row<DIM){
+        float as=uintBitsToFloat(a.v[activation_base+p.activation_scale_u32+group*2u+frag]);
+        sum=float(dotrow(e,activation_base,row,group,frag))*as*bf(e,row*GROUPS+group);
+        sum=subgroupAdd(sum);
+        if(lane==0u)out_data.v[rank*DIM+row]=sum*uintBitsToFloat(route.v[6u+rank]);
+    }
+}

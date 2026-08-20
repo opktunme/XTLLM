@@ -1,0 +1,32 @@
+#version 450
+
+// y[target,d] = post[target]*branch[d] + sum_source comb[source,target]*residual[source,d].
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer BranchData { float values[]; } branch;
+layout(set = 0, binding = 1, std430) readonly buffer ResidualData { float values[]; } residual;
+layout(set = 0, binding = 2, std430) readonly buffer SplitData { float values[]; } split;
+layout(set = 0, binding = 3, std430) writeonly buffer HCOutput { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint dimension;
+    uint hc;
+    uint split_stride;
+    uint unused;
+} params;
+
+void main() {
+    const uint linear = gl_GlobalInvocationID.x;
+    const uint token = gl_WorkGroupID.y;
+    const uint total = params.hc * params.dimension;
+    if (linear >= total) return;
+    const uint target = linear / params.dimension;
+    const uint column = linear - target * params.dimension;
+    const uint split_base = token * params.split_stride;
+    const uint residual_base = token * total;
+    float value = split.values[split_base + 4u + target] *
+                  branch.values[token * params.dimension + column];
+    for (uint source = 0u; source < 4u; ++source) {
+        if (source < params.hc) value += split.values[split_base + 8u + target * 4u + source] *
+            residual.values[residual_base + source * params.dimension + column];
+    }
+    output_data.values[residual_base + target * params.dimension + column] = value;
+}

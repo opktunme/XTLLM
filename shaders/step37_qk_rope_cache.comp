@@ -1,0 +1,50 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) buffer Query { float v[]; } query;
+layout(set=0,binding=1,std430) buffer Key { float v[]; } key;
+layout(set=0,binding=2,std430) readonly buffer QGamma { float v[]; } qgamma;
+layout(set=0,binding=3,std430) readonly buffer KGamma { float v[]; } kgamma;
+layout(set=0,binding=4,std430) buffer KVCache { float v[]; } cache;
+layout(set=0,binding=5,std430) readonly buffer Rope { float v[]; } rope;
+layout(push_constant) uniform P { uint layer; uint position; uint heads; uint rope_pairs; } p;
+
+const uint HEAD_DIM=128u;
+const uint KV_HEADS=8u;
+const uint MAX_CONTEXT=2048u;
+
+void main(){
+    uint lane=gl_LocalInvocationID.x;
+    uint head=gl_WorkGroupID.x;
+    if(head<p.heads){
+        float ss=0.0;
+        for(uint s=0u;s<2u;++s){uint d=lane+s*64u;float x=query.v[head*HEAD_DIM+d];ss+=x*x;}
+        ss=subgroupAdd(ss); float inv=inversesqrt(ss/128.0+1e-5);
+        for(uint s=0u;s<2u;++s){uint d=lane+s*64u;query.v[head*HEAD_DIM+d]*=inv*(qgamma.v[d]+1.0);}
+    }
+    if(head<KV_HEADS){
+        float ss=0.0;
+        for(uint s=0u;s<2u;++s){uint d=lane+s*64u;float x=key.v[head*HEAD_DIM+d];ss+=x*x;}
+        ss=subgroupAdd(ss); float inv=inversesqrt(ss/128.0+1e-5);
+        for(uint s=0u;s<2u;++s){uint d=lane+s*64u;key.v[head*HEAD_DIM+d]*=inv*(kgamma.v[d]+1.0);}
+    }
+    barrier();
+    if(head<p.heads && lane<p.rope_pairs){
+        uint base=head*HEAD_DIM; float a=query.v[base+lane];float b=query.v[base+p.rope_pairs+lane];
+        float c=rope.v[p.position*128u+lane];float s=rope.v[p.position*128u+64u+lane];
+        query.v[base+lane]=a*c-b*s;query.v[base+p.rope_pairs+lane]=b*c+a*s;
+    }
+    if(head<KV_HEADS){
+        if(lane<p.rope_pairs){
+            uint base=head*HEAD_DIM;float a=key.v[base+lane];float b=key.v[base+p.rope_pairs+lane];
+            float c=rope.v[p.position*128u+lane];float s=rope.v[p.position*128u+64u+lane];
+            key.v[base+lane]=a*c-b*s;key.v[base+p.rope_pairs+lane]=b*c+a*s;
+        }
+        barrier();
+        uint layer_base=p.layer*2u*MAX_CONTEXT*KV_HEADS*HEAD_DIM;
+        for(uint s=0u;s<2u;++s){uint d=lane+s*64u;
+            cache.v[layer_base+(p.position*KV_HEADS+head)*HEAD_DIM+d]=key.v[head*HEAD_DIM+d];
+        }
+    }
+}

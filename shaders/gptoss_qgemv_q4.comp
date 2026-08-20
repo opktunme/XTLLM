@@ -1,0 +1,45 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { vec4 values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer MatrixBlock { uvec4 values[]; } matrix_data;
+layout(set = 0, binding = 2, std430) readonly buffer Bias { float values[]; } bias_data;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint has_bias; uint columns; uint inner; uint packed_stride; } params;
+
+uint signed_nibbles(uint n) {
+    uint b = (n & 0x000fu) | ((n & 0x00f0u) << 4u) |
+             ((n & 0x0f00u) << 8u) | ((n & 0xf000u) << 12u);
+    const uint s = b & 0x08080808u;
+    return b | (s << 1u) | (s << 2u) | (s << 3u) | (s << 4u);
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    const uint vector_stride = params.packed_stride / 4u;
+    float sum = 0.0;
+    if (row < params.columns) {
+        const uvec4 packed_scales = matrix_data.values[row >> 2u];
+        const float scale = uintBitsToFloat(packed_scales[row & 3u]);
+        const uint base = (params.columns + 3u) / 4u + row * vector_stride;
+        for (uint v = lane; v < vector_stride; v += 64u) {
+            const uvec4 w = matrix_data.values[base + v];
+            const uint p = v * 8u;
+            sum += dot(activations.values[p], unpackSnorm4x8(signed_nibbles(w.x & 0xffffu)));
+            sum += dot(activations.values[p + 1u], unpackSnorm4x8(signed_nibbles(w.x >> 16u)));
+            sum += dot(activations.values[p + 2u], unpackSnorm4x8(signed_nibbles(w.y & 0xffffu)));
+            sum += dot(activations.values[p + 3u], unpackSnorm4x8(signed_nibbles(w.y >> 16u)));
+            sum += dot(activations.values[p + 4u], unpackSnorm4x8(signed_nibbles(w.z & 0xffffu)));
+            sum += dot(activations.values[p + 5u], unpackSnorm4x8(signed_nibbles(w.z >> 16u)));
+            sum += dot(activations.values[p + 6u], unpackSnorm4x8(signed_nibbles(w.w & 0xffffu)));
+            sum += dot(activations.values[p + 7u], unpackSnorm4x8(signed_nibbles(w.w >> 16u)));
+        }
+        sum = subgroupAdd(sum);
+        if (lane == 0u) {
+            const float bias = params.has_bias != 0u ? bias_data.values[row] : 0.0;
+            output_data.values[row] = sum * (127.0 * scale) + bias;
+        }
+    }
+}

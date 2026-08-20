@@ -1,0 +1,25 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer GateUp { float values[]; } gate_up;
+layout(set = 0, binding = 1, std430) writeonly buffer OutputData { float values[]; } output_data;
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint feed_forward_dimension;
+    uint unused0;
+    uint unused1;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+    const uint count = params.rows * params.feed_forward_dimension;
+    if (index >= count) return;
+    const uint row = index / params.feed_forward_dimension;
+    const uint column = index % params.feed_forward_dimension;
+    const uint row_base = row * (2 * params.feed_forward_dimension);
+    const float gate = gate_up.values[row_base + column];
+    const float up = gate_up.values[row_base + params.feed_forward_dimension + column];
+    const float silu = gate / (1.0 + exp(-gate));
+    output_data.values[index] = silu * up;
+}

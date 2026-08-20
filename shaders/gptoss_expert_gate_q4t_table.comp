@@ -1,0 +1,92 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) buffer AddressTable { uint64_t values[]; } addresses;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uvec4 unused; } params;
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer ExpertData {
+    uint values[];
+};
+
+const uint HIDDEN = 2880u;
+const uint PACKED = 720u;
+const uint GROUPS_PER_ROW = 45u;
+const uint WORDS_PER_ROW = 360u;
+const uint MLP1_SCALE_BYTE = 8294400u;
+const uint MLP1_BIAS_BYTE = 8812800u;
+
+float load_bf16(ExpertData data, uint byte_offset) {
+    const uint word = data.values[byte_offset >> 2u];
+    return uintBitsToFloat(((word >> ((byte_offset & 2u) * 8u)) & 0xffffu) << 16u);
+}
+uint signed_nibbles(uint n) {
+    uint b = (n & 0x000fu) | ((n & 0x00f0u) << 4u) |
+             ((n & 0x0f00u) << 8u) | ((n & 0xf000u) << 12u);
+    const uint s = b & 0x08080808u;
+    return b | (s << 1u) | (s << 2u) | (s << 3u) | (s << 4u);
+}
+int dot_word(ExpertData data, uint word, uint activation_word) {
+    const uint packed = data.values[word];
+    return dotPacked4x8EXT(int(activations.values[activation_word]),
+                           int(signed_nibbles(packed & 0xffffu))) +
+           dotPacked4x8EXT(int(activations.values[activation_word + 1u]),
+                           int(signed_nibbles(packed >> 16u)));
+}
+int group_dot(ExpertData data, uint row, uint group) {
+    const uint row_base = row * WORDS_PER_ROW;
+    const uint activation_word = group * 16u;
+    return dot_word(data, row_base + group, activation_word) +
+           dot_word(data, row_base + GROUPS_PER_ROW + group, activation_word + 2u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 2u + group, activation_word + 4u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 3u + group, activation_word + 6u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 4u + group, activation_word + 8u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 5u + group, activation_word + 10u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 6u + group, activation_word + 12u) +
+           dot_word(data, row_base + GROUPS_PER_ROW * 7u + group, activation_word + 14u);
+}
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint unit = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    const uint rank = gl_WorkGroupID.y;
+    const uint expert = uint(round(routing.values[rank]));
+    const uint64_t address = addresses.values[expert];
+    if (address == uint64_t(0)) {
+        if (lane == 0u && unit < HIDDEN)
+            output_data.values[rank * HIDDEN + unit] = 0.0;
+        if (lane == 0u && unit == 0u)
+            addresses.values[128u + rank] = uint64_t(1);
+        return;
+    }
+    ExpertData data = ExpertData(address);
+    float gate = 0.0, linear = 0.0;
+    if (unit < HIDDEN) {
+        const uint gate_row = unit * 2u;
+        const uint linear_row = gate_row + 1u;
+        for (uint group = lane; group < GROUPS_PER_ROW; group += 64u) {
+            gate += float(group_dot(data, gate_row, group)) *
+                load_bf16(data, MLP1_SCALE_BYTE +
+                                (gate_row * GROUPS_PER_ROW + group) * 2u);
+            linear += float(group_dot(data, linear_row, group)) *
+                load_bf16(data, MLP1_SCALE_BYTE +
+                                (linear_row * GROUPS_PER_ROW + group) * 2u);
+        }
+    }
+    const float activation_scale = uintBitsToFloat(activations.values[PACKED]);
+    gate = subgroupAdd(gate) * activation_scale;
+    linear = subgroupAdd(linear) * activation_scale;
+    if (lane == 0u && unit < HIDDEN) {
+        gate += load_bf16(data, MLP1_BIAS_BYTE + unit * 4u);
+        linear += load_bf16(data, MLP1_BIAS_BYTE + unit * 4u + 2u);
+        const float limited_gate = min(gate, 7.0);
+        const float limited_linear = clamp(linear, -7.0, 7.0);
+        output_data.values[rank * HIDDEN + unit] =
+            (limited_gate / (1.0 + exp(-1.702 * limited_gate))) *
+            (limited_linear + 1.0);
+    }
+}

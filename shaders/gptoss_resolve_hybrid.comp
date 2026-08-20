@@ -1,0 +1,65 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 1, std430) buffer Control { uint values[]; } control;
+layout(set = 0, binding = 2, std430) buffer Indirect { uint values[]; } indirect_data;
+layout(set = 0, binding = 3, std430) readonly buffer Dummy { uint value; } dummy;
+layout(push_constant) uniform Params { uvec4 unused; } params;
+
+const uint EXPERT_TO_SLOT = 0u;
+const uint SLOT_AGE = 148u;
+const uint SELECTED_SLOT = 168u;
+const uint NEEDS_COPY = 172u;
+const uint MISSING_COUNT = 176u;
+const uint MISSING_ID = 177u;
+const uint MISSING_SLOT = 181u;
+const uint CLOCK = 185u;
+const uint HOST_ADDRESS = 256u;
+const uint SELECTED_ADDRESS = 512u;
+const uint CACHE_ADDRESS = 520u;
+const uint ZERO_ADDRESS = 536u;
+const uint EXPERT_BLOCK_BYTES = 13236480u;
+
+uint64_t load_address(uint word) {
+    return uint64_t(control.values[word]) |
+           (uint64_t(control.values[word + 1u]) << 32u);
+}
+void store_address(uint word, uint64_t address) {
+    control.values[word] = uint(address);
+    control.values[word + 1u] = uint(address >> 32u);
+}
+
+void main() {
+    uint clock = control.values[CLOCK];
+    uint missing = 0u;
+    for (uint rank = 0u; rank < 4u; ++rank) {
+        const uint expert = uint(round(routing.values[rank]));
+        const uint slot = control.values[EXPERT_TO_SLOT + expert];
+        uint mode = 0u;
+        uint64_t selected;
+        if (slot != 0xffffffffu) {
+            selected = load_address(CACHE_ADDRESS) +
+                uint64_t(slot) * uint64_t(EXPERT_BLOCK_BYTES);
+            control.values[SLOT_AGE + slot] = ++clock;
+            control.values[SELECTED_SLOT + rank] = slot;
+        } else {
+            selected = load_address(HOST_ADDRESS + expert * 2u);
+            control.values[SELECTED_SLOT + rank] = 0xffffffffu;
+            if (selected != uint64_t(0)) {
+                mode = 3u;
+            } else {
+                mode = 2u;
+                selected = load_address(ZERO_ADDRESS);
+                control.values[MISSING_ID + missing] = expert;
+                control.values[MISSING_SLOT + missing] = rank;
+                ++missing;
+            }
+        }
+        control.values[NEEDS_COPY + rank] = mode;
+        store_address(SELECTED_ADDRESS + rank * 2u, selected);
+    }
+    control.values[CLOCK] = clock;
+    control.values[MISSING_COUNT] = missing;
+}

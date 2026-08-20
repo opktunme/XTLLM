@@ -1,0 +1,38 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer HalfExpertBlock { uint values[]; } experts;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint rank; uint unused0; uint unused1; uint unused2; } params;
+
+const uint HIDDEN = 448u, DIMENSION = 4096u;
+const uint GATE_ROWS = 896u, GATE_HALF_STRIDE = 2048u;
+const uint GATE_HALF_WORDS = GATE_ROWS * GATE_HALF_STRIDE;
+const uint DOWN_HALF_WORDS = 4096u * 224u;
+const uint EXPERT_HALF_WORDS = GATE_HALF_WORDS + DOWN_HALF_WORDS;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    const uint expert_base = uint(round(routing.values[params.rank])) * EXPERT_HALF_WORDS;
+    float gate0 = 0.0, gate1 = 0.0, up0 = 0.0, up1 = 0.0;
+    if (row < HIDDEN) {
+        const uint gate_base = expert_base + row * GATE_HALF_STRIDE;
+        const uint up_base = expert_base + (row + HIDDEN) * GATE_HALF_STRIDE;
+        for (uint pair = lane; pair < GATE_HALF_STRIDE; pair += 64u) {
+            const vec2 input_pair = vec2(activations.values[pair * 2u], activations.values[pair * 2u + 1u]);
+            const vec2 gate_weight = unpackHalf2x16(experts.values[gate_base + pair]);
+            const vec2 up_weight = unpackHalf2x16(experts.values[up_base + pair]);
+            gate0 += input_pair.x * gate_weight.x;
+            gate1 += input_pair.y * gate_weight.y;
+            up0 += input_pair.x * up_weight.x;
+            up1 += input_pair.y * up_weight.y;
+        }
+    }
+    const float gate = subgroupAdd(gate0 + gate1);
+    const float up = subgroupAdd(up0 + up1);
+    if (lane == 0u && row < HIDDEN) output_data.values[row] = (gate / (1.0 + exp(-gate))) * up;
+}

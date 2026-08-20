@@ -1,0 +1,13 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer X{float v[];}state;
+layout(set=0,binding=1,std430) buffer M{float v[];}mixes;
+layout(push_constant) uniform P{uint dimension;uint hc;uint mix_count;uint epsilon_bits;}p;
+void main(){
+    uint lane=gl_LocalInvocationID.x,t=gl_WorkGroupID.x,total=p.dimension*p.hc;
+    float s=0.0;for(uint i=lane;i<total;i+=64u){float x=state.v[t*total+i];s+=x*x;}
+    s=subgroupAdd(s);float scale=inversesqrt(s/float(total)+uintBitsToFloat(p.epsilon_bits));
+    if(lane<p.mix_count)mixes.v[t*p.mix_count+lane]*=scale;
+}

@@ -1,0 +1,42 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } scales;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint rows; uint columns; uint inner; uint packed_stride; } params;
+
+const uint Q2_OFFSET = 1024u;
+const uint SCALE1_OFFSET = 2048u;
+const uint SCALE2_OFFSET = 2112u;
+const uint GROUP_PACKED = 64u;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint first_row = gl_WorkGroupID.x * 8u;
+    float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (uint packed_index = lane; packed_index < params.packed_stride; packed_index += 64u) {
+        const uint group = packed_index / GROUP_PACKED;
+        const float scale1 = uintBitsToFloat(activations.values[SCALE1_OFFSET + group]);
+        const float scale2 = uintBitsToFloat(activations.values[SCALE2_OFFSET + group]);
+        const int activation1 = int(activations.values[packed_index]);
+        const int activation2 = int(activations.values[Q2_OFFSET + packed_index]);
+        for (uint row = 0; row < 8u; ++row) {
+            const uint output_row = first_row + row;
+            if (output_row < params.columns) {
+                const int weight = int(weights.values[output_row * params.packed_stride + packed_index]);
+                sums[row] += float(dotPacked4x8EXT(activation1, weight)) * scale1 +
+                             float(dotPacked4x8EXT(activation2, weight)) * scale2;
+            }
+        }
+    }
+    for (uint row = 0; row < 8u; ++row) sums[row] = subgroupAdd(sums[row]);
+    if (lane == 0u) for (uint row = 0; row < 8u; ++row) {
+        const uint output_row = first_row + row;
+        if (output_row < params.columns) output_data.values[output_row] =
+            sums[row] * scales.values[output_row];
+    }
+}

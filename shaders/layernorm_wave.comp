@@ -1,0 +1,24 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer InputData{float values[];}input_data;
+layout(set=0,binding=1,std430) readonly buffer Gamma{float values[];}gamma_data;
+layout(set=0,binding=2,std430) writeonly buffer OutputData{float values[];}output_data;
+layout(set=0,binding=3,std430) readonly buffer Beta{float values[];}beta_data;
+layout(push_constant) uniform Params{uint rows;uint columns;float epsilon;uint unused;}params;
+
+void main(){
+ const uint row=gl_WorkGroupID.x,lane=gl_LocalInvocationID.x;
+ float sum=0.0,square_sum=0.0;
+ for(uint column=lane;column<params.columns;column+=64u){
+  const float value=input_data.values[row*params.columns+column];sum+=value;square_sum+=value*value;
+ }
+ const float mean=subgroupAdd(sum)/float(params.columns);
+ const float variance=max(subgroupAdd(square_sum)/float(params.columns)-mean*mean,0.0);
+ const float inverse_std=inversesqrt(variance+params.epsilon);
+ for(uint column=lane;column<params.columns;column+=64u){
+  const uint index=row*params.columns+column;
+  output_data.values[index]=(input_data.values[index]-mean)*inverse_std*gamma_data.values[column]+beta_data.values[column];
+ }
+}

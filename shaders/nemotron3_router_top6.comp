@@ -1,0 +1,8 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer L{float v[];}logits;
+layout(set=0,binding=1,std430) readonly buffer B{float v[];}bias;
+layout(set=0,binding=2,std430) writeonly buffer R{uint v[];}routes;
+layout(push_constant) uniform P{uint experts;uint topk;uint unused0;uint unused1;}p;
+shared float score[128],choice[128];
+void main(){uint l=gl_LocalInvocationID.x;for(uint s=0;s<2;s++){uint e=l+s*64u;if(e<p.experts){float q=1.0/(1.0+exp(-logits.v[e]));score[e]=q;choice[e]=q+bias.v[e];}}barrier();if(l==0){uint ids[6];float sum=0;for(uint r=0;r<6;r++){float best=-3.402823466e38;uint id=0;for(uint e=0;e<p.experts;e++){bool used=false;for(uint q=0;q<r;q++)used=used||ids[q]==e;if(!used&&choice[e]>best){best=choice[e];id=e;}}ids[r]=id;sum+=score[id];}for(uint r=0;r<6;r++){routes.v[r]=ids[r];routes.v[6+r]=floatBitsToUint(score[ids[r]]/max(sum,1e-20)*2.5);}}}

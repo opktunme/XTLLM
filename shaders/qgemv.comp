@@ -1,0 +1,54 @@
+#version 450
+
+// Eight output channels per 256-thread workgroup. Each 32-lane row cooperates
+// on one INT8 dot product, reading packed weights in coalesced uint32 chunks.
+layout(local_size_x = 32, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } scales;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint columns;
+    uint inner;
+    uint packed_stride;
+} params;
+
+shared float partial_sums[256];
+
+int signed_byte(uint packed, uint byte_index) {
+    int value = int((packed >> (byte_index * 8u)) & 0xffu);
+    return value >= 128 ? value - 256 : value;
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint output_lane = gl_LocalInvocationID.y;
+    const uint column = gl_WorkGroupID.x * 8u + output_lane;
+    float sum = 0.0;
+    if (column < params.columns) {
+        const uint weight_base = column * params.packed_stride;
+        for (uint packed_index = lane; packed_index < params.packed_stride; packed_index += 32u) {
+            const uint packed = weights.values[weight_base + packed_index];
+            const uint k = packed_index * 4u;
+            if (k < params.inner) sum += activations.values[k] * float(signed_byte(packed, 0u));
+            if (k + 1u < params.inner) sum += activations.values[k + 1u] * float(signed_byte(packed, 1u));
+            if (k + 2u < params.inner) sum += activations.values[k + 2u] * float(signed_byte(packed, 2u));
+            if (k + 3u < params.inner) sum += activations.values[k + 3u] * float(signed_byte(packed, 3u));
+        }
+    }
+    const uint shared_index = output_lane * 32u + lane;
+    partial_sums[shared_index] = sum;
+    barrier();
+    for (uint stride = 16u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) {
+            partial_sums[shared_index] += partial_sums[shared_index + stride];
+        }
+        barrier();
+    }
+    if (lane == 0u && column < params.columns) {
+        output_data.values[column] = partial_sums[output_lane * 32u] * scales.values[column];
+    }
+}

@@ -1,0 +1,61 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer RouterWeights { float values[]; } weights;
+layout(set = 0, binding = 2, std430) writeonly buffer RoutingResult { float values[]; } result;
+
+layout(push_constant) uniform Params {
+    uint dimension;
+    uint experts;
+    float jitter_epsilon;
+    uint unused;
+} params;
+
+void main() {
+    float logits[16];
+    uint first = 0;
+    float first_max = -3.402823466e+38;
+    for (uint expert = 0; expert < params.experts; ++expert) {
+        float value = 0.0;
+        const uint base = expert * params.dimension;
+        for (uint column = 0; column < params.dimension; ++column) {
+            value += input_data.values[column] * weights.values[base + column];
+        }
+        logits[expert] = value;
+        if (value > first_max) {
+            first_max = value;
+            first = expert;
+        }
+    }
+
+    float first_denominator = 0.0;
+    for (uint expert = 0; expert < params.experts; ++expert) {
+        const float factor = max(abs(logits[expert]), first_max);
+        const bool masked = ((first_max - logits[expert]) / factor) >
+                            (2.0 * params.jitter_epsilon);
+        if (!masked) first_denominator += exp(logits[expert] - first_max);
+    }
+
+    uint second = first == 0 ? 1 : 0;
+    float second_max = logits[second];
+    for (uint expert = 0; expert < params.experts; ++expert) {
+        if (expert != first && logits[expert] > second_max) {
+            second_max = logits[expert];
+            second = expert;
+        }
+    }
+    float second_denominator = 0.0;
+    for (uint expert = 0; expert < params.experts; ++expert) {
+        if (expert == first) continue;
+        const float factor = max(abs(logits[expert]), second_max);
+        const bool masked = ((second_max - logits[expert]) / factor) >
+                            (2.0 * params.jitter_epsilon);
+        if (!masked) second_denominator += exp(logits[expert] - second_max);
+    }
+
+    result.values[0] = float(first);
+    result.values[1] = float(second);
+    result.values[2] = 1.0 / first_denominator;
+    result.values[3] = 1.0 / second_denominator;
+}

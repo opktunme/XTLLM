@@ -1,0 +1,10 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Pj{float v[];}proj;
+layout(set=0,binding=1,std430) readonly buffer Cv{float v[];}conv;
+layout(set=0,binding=2,std430) buffer S{float v[];}state;
+layout(set=0,binding=3,std430) readonly buffer Pm{float v[];}param;
+layout(set=0,binding=4,std430) writeonly buffer O{float v[];}outv;
+layout(push_constant) uniform P{uint heads;uint hd;uint groups;uint st;}p;
+float sp(float x){return log(1.0+exp(-abs(x)))+max(x,0.0);}
+void main(){uint d=gl_LocalInvocationID.x,h=gl_WorkGroupID.x;if(h>=p.heads)return;uint g=h/(p.heads/p.groups);float dt=sp(proj.v[10240u+h]+param.v[128u+h]);float da=exp(dt*(-exp(param.v[h]))),x=conv.v[h*64u+d],y=param.v[64u+h]*x;for(uint n=0;n<128u;n++){uint ix=(h*64u+d)*128u+n;float q=state.v[ix]*da+dt*conv.v[4096u+g*128u+n]*x;state.v[ix]=q;y+=q*conv.v[5120u+g*128u+n];}outv.v[h*64u+d]=y;}

@@ -1,0 +1,30 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=4,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Activations{vec4 values[];}activations;
+layout(set=0,binding=1,std430) readonly buffer ExpertBlock{uvec2 values[];}experts;
+layout(set=0,binding=2,std430) readonly buffer Routing{float values[];}routing;
+layout(set=0,binding=3,std430) buffer HiddenState{float values[];}hidden;
+layout(push_constant) uniform Params{uint unused0;uint unused1;uint unused2;uint unused3;}params;
+const uint HIDDEN=448u,GATE_ROWS=896u,GATE_STRIDE=1024u,DOWN_ROWS=4096u,DOWN_STRIDE=112u;
+const uint DOWN_BASE=GATE_ROWS+GATE_ROWS*GATE_STRIDE,EXPERT_WORDS=DOWN_BASE+DOWN_ROWS+DOWN_ROWS*DOWN_STRIDE;
+uint scalar_word(uint index){uvec2 v=experts.values[index/2u];return v[index&1u];}
+
+void main(){
+ const uint lane=gl_LocalInvocationID.x,row=gl_WorkGroupID.x*4u+gl_LocalInvocationID.y;
+ const uint e0=uint(round(routing.values[0]))*EXPERT_WORDS,e1=uint(round(routing.values[1]))*EXPERT_WORDS;
+ float sum0=0.0,sum1=0.0;
+ if(row<DOWN_ROWS){
+  const uint base0=(e0+DOWN_BASE+DOWN_ROWS+row*DOWN_STRIDE)/2u,base1=(e1+DOWN_BASE+DOWN_ROWS+row*DOWN_STRIDE)/2u;
+  for(uint v=lane;v<DOWN_STRIDE/2u;v+=64u){
+   const uvec2 w0=experts.values[base0+v],w1=experts.values[base1+v];const uint p=v*2u;
+   sum0+=dot(activations.values[p],unpackSnorm4x8(w0.x))+dot(activations.values[p+1u],unpackSnorm4x8(w0.y));
+   sum1+=dot(activations.values[HIDDEN/4u+p],unpackSnorm4x8(w1.x))+dot(activations.values[HIDDEN/4u+p+1u],unpackSnorm4x8(w1.y));
+  }
+ }
+ sum0=subgroupAdd(sum0);sum1=subgroupAdd(sum1);
+ if(lane==0u&&row<DOWN_ROWS)hidden.values[row]+=
+  sum0*(127.0*uintBitsToFloat(scalar_word(e0+DOWN_BASE+row)))*routing.values[2]+
+  sum1*(127.0*uintBitsToFloat(scalar_word(e1+DOWN_BASE+row)))*routing.values[3];
+}

@@ -1,0 +1,31 @@
+#version 450
+
+layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Value { float v[]; } value_data;
+layout(set=0,binding=1,std430) buffer KVCache { uint v[]; } cache;
+layout(set=0,binding=2,std430) readonly buffer DummyA { uint v; } a;
+layout(set=0,binding=3,std430) readonly buffer DummyB { uint v; } b;
+layout(push_constant) uniform P {
+    uint position;
+    uint max_context;
+    uint unused0;
+    uint unused1;
+} p;
+
+const uint HEAD_DIM = 256u;
+const uint KV_HEADS = 2u;
+
+uint bf16(float x) {
+    uint bits = floatBitsToUint(x);
+    bits += 0x7fffu + ((bits >> 16u) & 1u);
+    return bits >> 16u;
+}
+
+void main() {
+    uint pair = gl_GlobalInvocationID.x;
+    if (pair >= KV_HEADS * HEAD_DIM / 2u) return;
+    uint d = pair * 2u;
+    uint packed = bf16(value_data.v[d]) | (bf16(value_data.v[d + 1u]) << 16u);
+    uint value_base = p.max_context * KV_HEADS * (HEAD_DIM / 2u);
+    cache.v[value_base + p.position * KV_HEADS * (HEAD_DIM / 2u) + pair] = packed;
+}

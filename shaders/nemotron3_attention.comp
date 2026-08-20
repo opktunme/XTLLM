@@ -1,0 +1,9 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Q{float v[];}q;
+layout(set=0,binding=1,std430) readonly buffer C{float v[];}cache;
+layout(set=0,binding=2,std430) writeonly buffer O{float v[];}outv;
+layout(push_constant) uniform P{uint layer;uint pos;uint heads;uint u;}p;
+const uint HD=128u,KVH=2u,MAXC=2048u;shared float score[MAXC];
+void main(){uint l=gl_LocalInvocationID.x,h=gl_WorkGroupID.x;if(h>=p.heads)return;uint n=p.pos+1u,kv=h/(p.heads/KVH),lb=p.layer*2u*MAXC*KVH*HD;float mx=-3.402823466e38;for(uint t=0;t<n;t++){float s=0;for(uint z=0;z<2;z++){uint d=l+z*64u;s+=q.v[h*HD+d]*cache.v[lb+(t*KVH+kv)*HD+d];}s=subgroupAdd(s)*0.0883883476483;if(l==0)score[t]=s;mx=max(mx,s);}mx=subgroupMax(mx);barrier();float den=0;for(uint t=0;t<n;t++)den+=exp(score[t]-mx);for(uint z=0;z<2;z++){uint d=l+z*64u,o=h*HD+d;float y=0;for(uint t=0;t<n;t++)y+=exp(score[t]-mx)/den*cache.v[lb+MAXC*KVH*HD+(t*KVH+kv)*HD+d];outv.v[o]=y;}}

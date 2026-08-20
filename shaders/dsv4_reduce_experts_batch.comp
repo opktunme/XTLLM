@@ -1,0 +1,6 @@
+#version 450
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer E{float v[];}input_data;
+layout(set=0,binding=1,std430) writeonly buffer O{float v[];}output_data;
+layout(push_constant) uniform P{uint count;uint ranks;uint batch;uint unused;}p;
+void main(){uint i=gl_GlobalInvocationID.x,t=gl_WorkGroupID.y;if(i>=p.count||t>=p.batch)return;uint base=t*p.ranks*p.count+i;float s=input_data.v[base];for(uint r=1u;r<p.ranks;++r)s+=input_data.v[base+r*p.count];output_data.v[t*p.count+i]=s;}

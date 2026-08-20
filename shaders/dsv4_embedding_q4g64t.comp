@@ -1,0 +1,40 @@
+#version 450
+
+// Q4G64T embedding lookup. Each K64 group has a BF16 scale and eight
+// transposed uint words, each containing eight signed nibbles.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer PackedEmbedding { uint values[]; } weights;
+layout(set = 0, binding = 1, std430) readonly buffer PackedScales { uint values[]; } scales;
+layout(set = 0, binding = 2, std430) readonly buffer TokenData { uint value; } token_data;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint vocab_size;
+    uint dimension;
+    uint row_stride_u32;
+    uint output_offset;
+} params;
+
+float load_scale(uint index) {
+    const uint packed = scales.values[index >> 1u];
+    const uint bf16 = (packed >> ((index & 1u) * 16u)) & 0xffffu;
+    return uintBitsToFloat(bf16 << 16u);
+}
+
+void main() {
+    const uint column = gl_GlobalInvocationID.x;
+    const uint token = token_data.value;
+    if (column >= params.dimension) return;
+    if (token >= params.vocab_size) {
+        output_data.values[params.output_offset + column] = 0.0;
+        return;
+    }
+    const uint groups = params.dimension >> 6u;
+    const uint group = column >> 6u;
+    const uint within = column & 63u;
+    const uint word = within >> 3u;
+    const uint nibble = within & 7u;
+    const uint packed = weights.values[token * groups * 8u + word * groups + group];
+    const int quantized = bitfieldExtract(int(packed), int(nibble * 4u), 4);
+    output_data.values[params.output_offset + column] =
+        float(quantized) * load_scale(token * groups + group);
+}

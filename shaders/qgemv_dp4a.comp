@@ -1,0 +1,49 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Groupwise-Q8 activations and rowwise-Q8 weights. A native RDNA2 wave emits
+// eight rows with accelerated signed 4x8-bit dot products.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } scales;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint columns;
+    uint inner;
+    uint packed_stride;
+} params;
+
+const uint GROUP_PACKED = 1u;
+const uint MAX_PACKED = 1024u;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint first_row = gl_WorkGroupID.x * 8u;
+    float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (uint packed_index = lane; packed_index < params.packed_stride; packed_index += 64u) {
+        const int activation = int(activations.values[packed_index]);
+        const float activation_scale = uintBitsToFloat(
+            activations.values[MAX_PACKED + packed_index / GROUP_PACKED]);
+        for (uint row = 0; row < 8u; ++row) {
+            const uint output_row = first_row + row;
+            if (output_row < params.columns) {
+                const int weight = int(weights.values[output_row * params.packed_stride + packed_index]);
+                sums[row] += float(dotPacked4x8EXT(activation, weight)) * activation_scale;
+            }
+        }
+    }
+    for (uint row = 0; row < 8u; ++row) sums[row] = subgroupAdd(sums[row]);
+    if (lane == 0u) {
+        for (uint row = 0; row < 8u; ++row) {
+            const uint output_row = first_row + row;
+            if (output_row < params.columns) {
+                output_data.values[output_row] = sums[row] * scales.values[output_row];
+            }
+        }
+    }
+}

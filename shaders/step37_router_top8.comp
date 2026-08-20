@@ -1,0 +1,45 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set=0,binding=0,std430) readonly buffer Logits { float v[]; } logits;
+layout(set=0,binding=1,std430) readonly buffer Bias { float v[]; } bias;
+layout(set=0,binding=2,std430) writeonly buffer Routes { uint v[]; } routes;
+layout(set=0,binding=3,std430) readonly buffer Dummy { uint v; } dummy;
+layout(push_constant) uniform P { uint experts; uint top_k; uint scale_bits; uint unused; } p;
+
+const uint MAX_E = 288u;
+const uint MAX_K = 8u;
+shared float raw[MAX_E];
+shared float ranked[MAX_E];
+
+void main() {
+    uint lane=gl_LocalInvocationID.x;
+    for(uint s=0u;s<5u;++s){
+        uint e=lane+s*64u;
+        if(e<min(p.experts,MAX_E)){
+            float r=1.0/(1.0+exp(-logits.v[e]));
+            raw[e]=r; ranked[e]=r+bias.v[e];
+        }
+    }
+    barrier();
+    if(lane==0u){
+        uint ids[MAX_K]; float weights[MAX_K]; float total=0.0;
+        uint k=min(p.top_k,MAX_K);
+        for(uint r=0u;r<MAX_K;++r){
+            uint best_id=0u; float best=-3.402823466e+38;
+            if(r<k){
+                for(uint e=0u;e<min(p.experts,MAX_E);++e){
+                    bool used=false;
+                    for(uint q=0u;q<r;++q) used = used || ids[q]==e;
+                    if(!used && ranked[e]>best){best=ranked[e];best_id=e;}
+                }
+                ids[r]=best_id; weights[r]=raw[best_id]; total+=weights[r];
+            } else {ids[r]=0u;weights[r]=0.0;}
+        }
+        float scale=uintBitsToFloat(p.scale_bits);
+        for(uint r=0u;r<MAX_K;++r){
+            routes.v[r]=ids[r];
+            routes.v[MAX_K+r]=floatBitsToUint(r<k && total>0.0 ? weights[r]/total*scale : 0.0);
+        }
+    }
+}

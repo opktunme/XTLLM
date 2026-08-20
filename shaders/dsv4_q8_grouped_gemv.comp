@@ -1,0 +1,50 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// One Y workgroup per independent group (wo_a uses 8 groups). Activations use
+// the standard quantizer layout: all packed I8 words, then all F32 scales.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } weight_scales;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(push_constant) uniform Params {
+    uint groups;
+    uint rows_per_group;
+    uint inner;
+    uint activation_scale_u32;
+} params;
+
+const uint WORDS_PER_GROUP = 32u;
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint group = gl_WorkGroupID.y;
+    if (group >= params.groups) return;
+    const uint first_local_row = gl_WorkGroupID.x * 4u;
+    const uint packed_stride = (params.inner + 3u) >> 2u;
+    const uint a_base = group * packed_stride;
+    const uint scale_blocks = (params.inner + 127u) >> 7u;
+    float sums[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (uint word = lane; word < packed_stride; word += 64u) {
+            const int a = int(activations.values[a_base + word]);
+            const float as = uintBitsToFloat(activations.values[
+                params.activation_scale_u32 + group * scale_blocks + word / WORDS_PER_GROUP]);
+            for (uint r = 0u; r < 4u; ++r) {
+                const uint local_row = first_local_row + r;
+                if (local_row < params.rows_per_group) {
+                    const uint row = group * params.rows_per_group + local_row;
+                    sums[r] += float(dotPacked4x8EXT(a,
+                        int(weights.values[row * packed_stride + word]))) * as;
+                }
+            }
+    }
+    for (uint r = 0u; r < 4u; ++r) sums[r] = subgroupAdd(sums[r]);
+    if (lane == 0u) for (uint r = 0u; r < 4u; ++r) {
+        const uint local_row = first_local_row + r;
+        if (local_row < params.rows_per_group) {
+            const uint row = group * params.rows_per_group + local_row;
+            output_data.values[row] = sums[r] * weight_scales.values[row];
+        }
+    }
+}

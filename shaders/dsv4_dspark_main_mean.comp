@@ -1,0 +1,19 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer MainTargets { float values[]; } targets;
+layout(set = 0, binding = 1, std430) writeonly buffer MainConcat { float values[]; } output_data;
+layout(push_constant) uniform Params { uint dimension; uint targets_count; uint hc; uint unused; } params;
+
+void main() {
+    const uint linear = gl_GlobalInvocationID.x;
+    const uint count = params.targets_count * params.dimension;
+    if (linear >= count) return;
+    const uint target = linear / params.dimension;
+    const uint column = linear - target * params.dimension;
+    const uint base = target * params.hc * params.dimension + column;
+    float value = 0.0;
+    for (uint h = 0u; h < 4u; ++h)
+        if (h < params.hc) value += targets.values[base + h * params.dimension];
+    output_data.values[linear] = value / float(params.hc);
+}

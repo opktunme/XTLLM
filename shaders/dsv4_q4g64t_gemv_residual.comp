@@ -1,0 +1,95 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Residual variant of dsv4_q4g64t_gemv.  Bindings and push constants match
+// dsv4_q8_gemv_residual so descriptor construction can be shared.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer PackedWeightScales { uint values[]; } weight_scales;
+layout(set = 0, binding = 3, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(set = 0, binding = 4, std430) readonly buffer ResidualData { float values[]; } residual_data;
+layout(push_constant) uniform Params {
+    uint rows;
+    uint inner;
+    uint activation_scale_u32;
+    uint output_offset;
+} params;
+
+const uint Q4_GROUP_SIZE = 64u;
+const uint Q4_WORDS_PER_GROUP = 8u;
+const uint LANES_PER_GROUP = 2u;
+const uint GROUPS_PER_WAVE = 32u;
+
+uint signed_nibbles(uint n) {
+    uint b = (n & 0x000fu) | ((n & 0x00f0u) << 4u) |
+             ((n & 0x0f00u) << 8u) | ((n & 0xf000u) << 12u);
+    const uint signs = b & 0x08080808u;
+    return b | (signs << 1u) | (signs << 2u) | (signs << 3u) |
+               (signs << 4u);
+}
+
+int dot_q4x8(uint packed, uint a0, uint a1) {
+    return dotPacked4x8EXT(int(a0), int(signed_nibbles(packed & 0xffffu))) +
+           dotPacked4x8EXT(int(a1), int(signed_nibbles(packed >> 16u)));
+}
+
+float load_bf16(uint index) {
+    const uint packed = weight_scales.values[index >> 1u];
+    const uint value = (packed >> ((index & 1u) * 16u)) & 0xffffu;
+    return uintBitsToFloat(value << 16u);
+}
+
+uint load_activation(uint index, uint packed_stride) {
+    return index < packed_stride ? activations.values[index] : 0u;
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint fragment = lane & (LANES_PER_GROUP - 1u);
+    const uint lane_group = lane / LANES_PER_GROUP;
+    const uint first_row = gl_WorkGroupID.x * 8u;
+    const uint packed_stride = (params.inner + 3u) >> 2u;
+    const uint q4_groups = (params.inner + Q4_GROUP_SIZE - 1u) / Q4_GROUP_SIZE;
+    const uint words_per_row = q4_groups * Q4_WORDS_PER_GROUP;
+    float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    for (uint group = lane_group; group < q4_groups; group += GROUPS_PER_WAVE) {
+        const uint word_in_group = fragment * 4u;
+        const uint activation_word = group * 16u + word_in_group * 2u;
+        const uint a0 = load_activation(activation_word, packed_stride);
+        const uint a1 = load_activation(activation_word + 1u, packed_stride);
+        const uint a2 = load_activation(activation_word + 2u, packed_stride);
+        const uint a3 = load_activation(activation_word + 3u, packed_stride);
+        const uint a4 = load_activation(activation_word + 4u, packed_stride);
+        const uint a5 = load_activation(activation_word + 5u, packed_stride);
+        const uint a6 = load_activation(activation_word + 6u, packed_stride);
+        const uint a7 = load_activation(activation_word + 7u, packed_stride);
+        const float activation_scale = uintBitsToFloat(
+            activations.values[params.activation_scale_u32 + (group >> 1u)]);
+
+        for (uint r = 0u; r < 8u; ++r) {
+            const uint row = first_row + r;
+            if (row < params.rows) {
+                const uint base = row * words_per_row + word_in_group * q4_groups + group;
+                int dot_sum = dot_q4x8(weights.values[base], a0, a1);
+                dot_sum += dot_q4x8(weights.values[base + q4_groups], a2, a3);
+                dot_sum += dot_q4x8(weights.values[base + q4_groups * 2u], a4, a5);
+                dot_sum += dot_q4x8(weights.values[base + q4_groups * 3u], a6, a7);
+                sums[r] += float(dot_sum) * activation_scale *
+                           load_bf16(row * q4_groups + group);
+            }
+        }
+    }
+
+    for (uint r = 0u; r < 8u; ++r) sums[r] = subgroupAdd(sums[r]);
+    if (lane == 0u) {
+        for (uint r = 0u; r < 8u; ++r) {
+            const uint row = first_row + r;
+            if (row < params.rows)
+                output_data.values[params.output_offset + row] = sums[r] +
+                    residual_data.values[row];
+        }
+    }
+}

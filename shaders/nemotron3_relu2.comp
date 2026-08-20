@@ -1,0 +1,6 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer X{float v[];}x;
+layout(set=0,binding=1,std430) writeonly buffer Y{float v[];}y;
+layout(push_constant) uniform P{uint count;uint a;uint b;uint c;}p;
+void main(){uint i=gl_GlobalInvocationID.x;if(i<p.count){float q=max(x.v[i],0.0);y.v[i]=q*q;}}

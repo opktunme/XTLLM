@@ -1,0 +1,87 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { vec4 values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer ExpertArena { uint values[]; } expert_data;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uvec4 slots; } params;
+
+const uint HIDDEN = 2880u;
+const uint BLOCKS_PER_ROW = 90u;
+const uint EXPERT_BLOCK_U32 = 2531520u;
+const uint MLP1_SCALE_BYTE = 6220800u;
+const uint MLP1_BIAS_BYTE = 6739200u;
+
+uint load_byte(uint base, uint byte_offset) {
+    const uint word = expert_data.values[base + (byte_offset >> 2u)];
+    return (word >> ((byte_offset & 3u) * 8u)) & 255u;
+}
+
+float load_bf16(uint base, uint byte_offset) {
+    const uint word = expert_data.values[base + (byte_offset >> 2u)];
+    const uint bits = (word >> ((byte_offset & 2u) * 8u)) & 0xffffu;
+    return uintBitsToFloat(bits << 16u);
+}
+
+vec4 decode_q3(uvec4 code) {
+    uvec4 bits = mix(uvec4(0x3f800000u), uvec4(0x40200000u),
+                     greaterThan(code, uvec4(2u)));
+    bits = mix(bits, uvec4(0x40900000u), greaterThan(code, uvec4(4u)));
+    bits |= (((code & 1u) ^ 1u) << 31u);
+    bits = mix(bits, uvec4(0u), equal(code, uvec4(0u)));
+    return uintBitsToFloat(bits);
+}
+
+float dot_chunk(uint packed, uint activation_index) {
+    const vec4 low = decode_q3(uvec4(packed, packed >> 3u, packed >> 6u,
+                                     packed >> 9u) & 7u);
+    const vec4 high = decode_q3(uvec4(packed >> 12u, packed >> 15u,
+                                      packed >> 18u, packed >> 21u) & 7u);
+    return dot(activations.values[activation_index], low) +
+           dot(activations.values[activation_index + 1u], high);
+}
+
+float block_dot(uint base, uint row, uint block) {
+    const uint word_base = base + (row * BLOCKS_PER_ROW + block) * 3u;
+    const uint w0 = expert_data.values[word_base];
+    const uint w1 = expert_data.values[word_base + 1u];
+    const uint w2 = expert_data.values[word_base + 2u];
+    const uint input_base = block * 8u;
+    return dot_chunk(w0 & 0xffffffu, input_base) +
+           dot_chunk((w0 >> 24u) | ((w1 & 0xffffu) << 8u), input_base + 2u) +
+           dot_chunk((w1 >> 16u) | ((w2 & 0xffu) << 16u), input_base + 4u) +
+           dot_chunk(w2 >> 8u, input_base + 6u);
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint unit = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    const uint rank = gl_WorkGroupID.y;
+    const uint base = params.slots[rank] * EXPERT_BLOCK_U32;
+    float gate = 0.0;
+    float linear = 0.0;
+    if (unit < HIDDEN) {
+        const uint gate_row = unit * 2u;
+        const uint linear_row = gate_row + 1u;
+        for (uint block = lane; block < BLOCKS_PER_ROW; block += 64u) {
+            const float gate_scale = uintBitsToFloat(
+                load_byte(base, MLP1_SCALE_BYTE + gate_row * BLOCKS_PER_ROW + block) << 23u);
+            const float linear_scale = uintBitsToFloat(
+                load_byte(base, MLP1_SCALE_BYTE + linear_row * BLOCKS_PER_ROW + block) << 23u);
+            gate += block_dot(base, gate_row, block) * gate_scale;
+            linear += block_dot(base, linear_row, block) * linear_scale;
+        }
+    }
+    gate = subgroupAdd(gate);
+    linear = subgroupAdd(linear);
+    if (lane == 0u && unit < HIDDEN) {
+        gate += load_bf16(base, MLP1_BIAS_BYTE + unit * 4u);
+        linear += load_bf16(base, MLP1_BIAS_BYTE + unit * 4u + 2u);
+        const float limited_gate = min(gate, 7.0);
+        const float limited_linear = clamp(linear, -7.0, 7.0);
+        const float swish = limited_gate / (1.0 + exp(-1.702 * limited_gate));
+        output_data.values[rank * HIDDEN + unit] = swish * (limited_linear + 1.0);
+    }
+}

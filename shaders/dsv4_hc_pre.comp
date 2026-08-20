@@ -1,0 +1,27 @@
+#version 450
+
+// y[d] = sum_h pre[h] * state[h,d]. Dispatch (ceil(dim/64), tokens, 1).
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer HCState { float values[]; } state;
+layout(set = 0, binding = 1, std430) readonly buffer SplitData { float values[]; } split;
+layout(set = 0, binding = 2, std430) writeonly buffer ReducedData { float values[]; } reduced;
+layout(set = 0, binding = 3, std430) readonly buffer Dummy { uint value; } dummy;
+layout(push_constant) uniform Params {
+    uint dimension;
+    uint hc;
+    uint split_stride;
+    uint unused;
+} params;
+
+void main() {
+    const uint column = gl_GlobalInvocationID.x;
+    const uint token = gl_WorkGroupID.y;
+    if (column >= params.dimension) return;
+    const uint state_base = token * params.hc * params.dimension;
+    const uint split_base = token * params.split_stride;
+    float value = 0.0;
+    for (uint h = 0u; h < 4u; ++h)
+        if (h < params.hc) value += split.values[split_base + h] *
+            state.values[state_base + h * params.dimension + column];
+    reduced.values[token * params.dimension + column] = value;
+}

@@ -1,0 +1,63 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Reference E4M3FN quantizer with power-of-two UE8M0 scale per 128 values.
+// Packed FP8 words occupy [0, packed_words); each scale code is stored in the
+// low byte of a separate uint at scale_u32 + group (race-free host layout).
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) writeonly buffer QuantizedData { uint values[]; } output_data;
+layout(set = 0, binding = 2, std430) readonly buffer DummyA { uint value; } dummy_a;
+layout(set = 0, binding = 3, std430) readonly buffer DummyB { uint value; } dummy_b;
+layout(push_constant) uniform Params {
+    uint count;
+    uint group_size;
+    uint packed_words;
+    uint scale_u32;
+} params;
+
+uint encode_e4m3fn(float value) {
+    const uint sign_bit = value < 0.0 ? 0x80u : 0u;
+    const float x = min(abs(value), 448.0);
+    if (x == 0.0) return sign_bit;
+    if (x < 0.015625) {
+        const uint mantissa = uint(roundEven(x * 512.0));
+        return mantissa >= 8u ? sign_bit | 0x08u : sign_bit | mantissa;
+    }
+    int exponent = int(floor(log2(x)));
+    int mantissa = int(roundEven((x * exp2(float(-exponent)) - 1.0) * 8.0));
+    if (mantissa >= 8) { exponent += 1; mantissa = 0; }
+    int biased = exponent + 7;
+    if (biased > 15 || (biased == 15 && mantissa > 6)) { biased = 15; mantissa = 6; }
+    return sign_bit | (uint(biased) << 3u) | uint(max(mantissa, 0));
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint group = gl_WorkGroupID.x;
+    const uint size = min(params.group_size, 128u);
+    const uint begin = group * params.group_size;
+    if (begin >= params.count || size == 0u) return;
+    const uint end = min(begin + size, params.count);
+    float maximum = 0.0;
+    for (uint step = 0u; step < 2u; ++step) {
+        const uint i = begin + lane + step * 64u;
+        if (i < end) maximum = max(maximum, abs(input_data.values[i]));
+    }
+    maximum = subgroupMax(maximum);
+    maximum = max(maximum, 1.0e-4);
+    const int scale_exponent = int(ceil(log2(maximum / 448.0)));
+    const uint scale_code = uint(clamp(scale_exponent + 127, 1, 254));
+    const float scale = exp2(float(int(scale_code) - 127));
+    if (lane == 0u) output_data.values[params.scale_u32 + group] = scale_code;
+    const uint words = (end - begin + 3u) >> 2u;
+    if (lane < words) {
+        const uint index = begin + lane * 4u;
+        uint packed = 0u;
+        for (uint j = 0u; j < 4u; ++j)
+            if (index + j < end) packed |= encode_e4m3fn(
+                clamp(input_data.values[index + j] / scale, -448.0, 448.0)) << (j * 8u);
+        const uint word = (begin >> 2u) + lane;
+        if (word < params.packed_words) output_data.values[word] = packed;
+    }
+}

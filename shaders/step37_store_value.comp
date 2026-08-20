@@ -1,0 +1,11 @@
+#version 450
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Value { float v[]; } value_data;
+layout(set=0,binding=1,std430) buffer KVCache { float v[]; } cache;
+layout(set=0,binding=2,std430) readonly buffer DummyA { uint v; } a;
+layout(set=0,binding=3,std430) readonly buffer DummyB { uint v; } b;
+layout(push_constant) uniform P { uint layer; uint position; uint unused0; uint unused1; } p;
+const uint HEAD_DIM=128u;const uint KV_HEADS=8u;const uint MAX_CONTEXT=2048u;
+void main(){uint i=gl_GlobalInvocationID.x;if(i>=KV_HEADS*HEAD_DIM)return;
+uint lb=p.layer*2u*MAX_CONTEXT*KV_HEADS*HEAD_DIM;
+cache.v[lb+MAX_CONTEXT*KV_HEADS*HEAD_DIM+p.position*KV_HEADS*HEAD_DIM+i]=value_data.v[i];}

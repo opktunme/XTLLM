@@ -1,0 +1,40 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } scales;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint columns;
+    uint inner;
+    uint packed_stride;
+} params;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.x * 4u + gl_LocalInvocationID.y;
+    float sum = 0.0;
+    if (row < params.columns) {
+        const uint weight_base = row * params.packed_stride;
+        for (uint packed_index = lane; packed_index < params.packed_stride; packed_index += 64u) {
+            const uint k = packed_index * 4u;
+            f16vec4 input_values = f16vec4(0.0hf);
+            if (k < params.inner) input_values.x = float16_t(activations.values[k]);
+            if (k + 1u < params.inner) input_values.y = float16_t(activations.values[k + 1u]);
+            if (k + 2u < params.inner) input_values.z = float16_t(activations.values[k + 2u]);
+            if (k + 3u < params.inner) input_values.w = float16_t(activations.values[k + 3u]);
+            const f16vec4 weight_values = f16vec4(unpackSnorm4x8(
+                weights.values[weight_base + packed_index]));
+            sum += float(dot(input_values, weight_values));
+        }
+    }
+    sum = subgroupAdd(sum);
+    if (lane == 0u && row < params.columns) {
+        output_data.values[row] = sum * (127.0 * scales.values[row]);
+    }
+}

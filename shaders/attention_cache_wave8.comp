@@ -1,0 +1,27 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=8,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer AttentionState{float values[];}state;
+layout(set=0,binding=1,std430) writeonly buffer Context{float values[];}context;
+layout(push_constant) uniform Params{uint position;uint model_dimension;uint head_dimension;uint kv_dimension;}params;
+const uint MAX_SEQUENCE=256u;shared float scores[MAX_SEQUENCE];shared float normalization;
+void main(){
+ const uint lane=gl_LocalInvocationID.x,wave=gl_LocalInvocationID.y,local=gl_LocalInvocationIndex,head=gl_WorkGroupID.x;
+ const uint head_base=head*params.head_dimension,query_heads=params.model_dimension/params.head_dimension;
+ const uint kv_heads=params.kv_dimension/params.head_dimension,kv_head=head/(query_heads/kv_heads),kv_head_base=kv_head*params.head_dimension;
+ const float scale=inversesqrt(float(params.head_dimension));
+ for(uint source_index=wave;source_index<=params.position;source_index+=8u){
+  const uint key_base=params.model_dimension+source_index*params.kv_dimension+kv_head_base;
+  float partial=state.values[head_base+lane]*state.values[key_base+lane];
+  if(lane+64u<params.head_dimension)partial+=state.values[head_base+lane+64u]*state.values[key_base+lane+64u];
+  const float score=subgroupAdd(partial)*scale;if(lane==0u)scores[source_index]=score;
+ }
+ barrier();
+ if(local==0u){float maximum=-3.402823466e+38;for(uint s=0u;s<=params.position;++s)maximum=max(maximum,scores[s]);
+  float denominator=0.0;for(uint s=0u;s<=params.position;++s){scores[s]=exp(scores[s]-maximum);denominator+=scores[s];}normalization=denominator;}
+ barrier();
+ if(local<params.head_dimension){const uint value_cache_base=params.model_dimension+MAX_SEQUENCE*params.kv_dimension;float value=0.0;
+  for(uint s=0u;s<=params.position;++s){const uint value_index=value_cache_base+s*params.kv_dimension+kv_head_base+local;
+   value+=(scores[s]/normalization)*state.values[value_index];}context.values[head_base+local]=value;}
+}

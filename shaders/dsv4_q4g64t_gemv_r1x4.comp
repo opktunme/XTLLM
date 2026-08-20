@@ -1,0 +1,17 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=4,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer A{uint v[];} a;
+layout(set=0,binding=1,std430) readonly buffer W{uint v[];} w;
+layout(set=0,binding=2,std430) readonly buffer S{uint v[];} s;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];} o;
+layout(push_constant) uniform P{uint rows;uint inner;uint activation_scale_u32;uint output_offset;} p;
+const uint GS=64u,WG=8u,LPG=2u,GPW=32u;
+uint sn(uint n){uint b=(n&15u)|((n&240u)<<4u)|((n&3840u)<<8u)|((n&61440u)<<12u);uint q=b&0x08080808u;return b|(q<<1u)|(q<<2u)|(q<<3u)|(q<<4u);}
+int dq(uint x,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sn(x&65535u)))+dotPacked4x8EXT(int(a1),int(sn(x>>16u)));}
+float bf(uint i){uint x=(s.v[i>>1u]>>((i&1u)*16u))&65535u;return uintBitsToFloat(x<<16u);}
+uint la(uint i,uint n){return i<n?a.v[i]:0u;}
+void main(){uint lane=gl_LocalInvocationID.x,frag=lane&(LPG-1u),lg=lane/LPG;
+uint row=gl_WorkGroupID.x*4u+gl_LocalInvocationID.y,ps=(p.inner+3u)>>2u,gc=(p.inner+GS-1u)/GS,wr=gc*WG;float sum=0.0;
+if(row<p.rows){for(uint g=lg;g<gc;g+=GPW){uint wi=frag*4u,ai=g*16u+wi*2u;uint a0=la(ai,ps),a1=la(ai+1u,ps),a2=la(ai+2u,ps),a3=la(ai+3u,ps),a4=la(ai+4u,ps),a5=la(ai+5u,ps),a6=la(ai+6u,ps),a7=la(ai+7u,ps);uint base=row*wr+wi*gc+g;int d=dq(w.v[base],a0,a1)+dq(w.v[base+gc],a2,a3)+dq(w.v[base+2u*gc],a4,a5)+dq(w.v[base+3u*gc],a6,a7);sum+=float(d)*uintBitsToFloat(a.v[p.activation_scale_u32+(g>>1u)])*bf(row*gc+g);}sum=subgroupAdd(sum);if(lane==0u)o.v[p.output_offset+row]=sum;}}

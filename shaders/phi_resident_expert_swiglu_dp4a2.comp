@@ -1,0 +1,50 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer QuantizedActivations { uint values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer ExpertBlock { uint values[]; } experts;
+layout(set = 0, binding = 2, std430) readonly buffer Routing { float values[]; } routing;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+layout(push_constant) uniform Params { uint rank; uint unused0; uint unused1; uint unused2; } params;
+
+const uint HIDDEN = 448u, GATE_ROWS = 896u, GATE_STRIDE = 1024u;
+const uint DOWN_ROWS = 4096u, DOWN_STRIDE = 112u;
+const uint EXPERT_WORDS = GATE_ROWS + GATE_ROWS * GATE_STRIDE + DOWN_ROWS + DOWN_ROWS * DOWN_STRIDE;
+const uint Q2_OFFSET = 1024u, SCALE1_OFFSET = 2048u, SCALE2_OFFSET = 2112u, GROUP_PACKED = 64u;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint first_row = gl_WorkGroupID.x * 4u;
+    const uint expert_base = uint(round(routing.values[params.rank])) * EXPERT_WORDS;
+    float gate[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    float up[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (uint packed_index = lane; packed_index < GATE_STRIDE; packed_index += 64u) {
+        const uint group = packed_index / GROUP_PACKED;
+        const float scale1 = uintBitsToFloat(activations.values[SCALE1_OFFSET + group]);
+        const float scale2 = uintBitsToFloat(activations.values[SCALE2_OFFSET + group]);
+        const int q1 = int(activations.values[packed_index]);
+        const int q2 = int(activations.values[Q2_OFFSET + packed_index]);
+        for (uint item = 0u; item < 4u; ++item) {
+            const uint row = first_row + item;
+            if (row < HIDDEN) {
+                const uint gate_base = expert_base + GATE_ROWS + row * GATE_STRIDE + packed_index;
+                const uint up_base = expert_base + GATE_ROWS + (row + HIDDEN) * GATE_STRIDE + packed_index;
+                const int wg = int(experts.values[gate_base]);
+                const int wu = int(experts.values[up_base]);
+                gate[item] += float(dotPacked4x8EXT(q1, wg)) * scale1 + float(dotPacked4x8EXT(q2, wg)) * scale2;
+                up[item] += float(dotPacked4x8EXT(q1, wu)) * scale1 + float(dotPacked4x8EXT(q2, wu)) * scale2;
+            }
+        }
+    }
+    for (uint item = 0u; item < 4u; ++item) { gate[item] = subgroupAdd(gate[item]); up[item] = subgroupAdd(up[item]); }
+    if (lane == 0u) for (uint item = 0u; item < 4u; ++item) {
+        const uint row = first_row + item;
+        if (row < HIDDEN) {
+            const float g = gate[item] * uintBitsToFloat(experts.values[expert_base + row]);
+            const float u = up[item] * uintBitsToFloat(experts.values[expert_base + row + HIDDEN]);
+            output_data.values[row] = (g / (1.0 + exp(-g))) * u;
+        }
+    }
+}

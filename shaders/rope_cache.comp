@@ -1,0 +1,48 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputQKV { float values[]; } qkv;
+layout(set = 0, binding = 1, std430) readonly buffer RopeCos { float values[]; } rope_cos;
+layout(set = 0, binding = 2, std430) readonly buffer RopeSin { float values[]; } rope_sin;
+// Layout: current rotated query, then K cache, then V cache.
+layout(set = 0, binding = 3, std430) buffer AttentionState { float values[]; } state;
+
+layout(push_constant) uniform Params {
+    uint position;
+    uint model_dimension;
+    uint head_dimension;
+    uint kv_dimension;
+} params;
+
+const uint CACHE_SEQUENCE = 256;
+
+void main() {
+    const uint dimension = gl_GlobalInvocationID.x;
+    if (dimension >= params.model_dimension) return;
+    const uint head_offset = dimension % params.head_dimension;
+    const uint half_head = params.head_dimension / 2;
+    const uint paired_offset = head_offset < half_head ? head_offset + half_head
+                                                       : head_offset - half_head;
+    const uint paired_dimension = dimension - head_offset + paired_offset;
+    const uint frequency = head_offset % half_head;
+    const uint rope_index = params.position * half_head + frequency;
+    const float cosine = rope_cos.values[rope_index];
+    const float sine = rope_sin.values[rope_index];
+    const float sign = head_offset < half_head ? -1.0 : 1.0;
+
+    const float query = qkv.values[dimension];
+    const float paired_query = qkv.values[paired_dimension];
+    state.values[dimension] = query * cosine + sign * paired_query * sine;
+
+    if (dimension < params.kv_dimension) {
+        const float key = qkv.values[params.model_dimension + dimension];
+        const float paired_key = qkv.values[params.model_dimension + paired_dimension];
+        const uint key_base = params.model_dimension + params.position * params.kv_dimension;
+        state.values[key_base + dimension] = key * cosine + sign * paired_key * sine;
+
+        const uint value_base = params.model_dimension + CACHE_SEQUENCE * params.kv_dimension +
+                                params.position * params.kv_dimension;
+        state.values[value_base + dimension] =
+            qkv.values[params.model_dimension + params.kv_dimension + dimension];
+    }
+}

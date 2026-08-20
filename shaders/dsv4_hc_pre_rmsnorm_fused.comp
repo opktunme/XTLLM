@@ -1,0 +1,28 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// HC pre-reduction plus RMSNorm. The 4096 reduced scalars live in 16 KiB LDS,
+// eliminating the global scratch round trip and the second dispatch.
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer HCState{float v[];} state;
+layout(set=0,binding=1,std430) readonly buffer SplitData{float v[];} split;
+layout(set=0,binding=2,std430) readonly buffer Gamma{float v[];} gamma_data;
+layout(set=0,binding=3,std430) writeonly buffer Output{float v[];} output_data;
+layout(push_constant) uniform P{uint rms_epsilon_bits;uint unused0;uint unused1;uint unused2;} p;
+
+shared float reduced[4096];
+
+void main(){
+    const uint lane=gl_LocalInvocationID.x;
+    float square_sum=0.0;
+    for(uint column=lane;column<4096u;column+=64u){
+        float value=0.0;
+        for(uint h=0u;h<4u;++h)value+=split.v[h]*state.v[h*4096u+column];
+        reduced[column]=value;
+        square_sum+=value*value;
+    }
+    square_sum=subgroupAdd(square_sum);
+    const float inv_rms=inversesqrt(square_sum/4096.0+uintBitsToFloat(p.rms_epsilon_bits));
+    for(uint column=lane;column<4096u;column+=64u)
+        output_data.v[column]=reduced[column]*inv_rms*gamma_data.v[column];
+}

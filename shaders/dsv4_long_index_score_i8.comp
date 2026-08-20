@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+#ifndef DSV4_INDEX_ROWS
+#define DSV4_INDEX_ROWS 8
+#endif
+layout(local_size_x=64,local_size_y=DSV4_INDEX_ROWS,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Queries{uint v[];} queries;
+layout(set=0,binding=1,std430) readonly buffer IndexKV{uint v[];} keys;
+layout(set=0,binding=2,std430) readonly buffer HeadWeights{float v[];} weights;
+layout(set=0,binding=3,std430) writeonly buffer Scores{float v[];} scores;
+layout(push_constant) uniform P{uint count;uint head_dim;uint heads;uint unused;} p;
+
+void main(){
+    uint position=gl_WorkGroupID.x*uint(DSV4_INDEX_ROWS)+gl_LocalInvocationID.y;
+    uint head=gl_LocalInvocationID.x;if(position>=p.count||head>=p.heads)return;
+    uint qbase=head*33u,kbase=position*33u;
+    uint qexp=queries.v[qbase+32u],kexp=keys.v[kbase+32u];float dotv=0.0;
+    for(uint group=0u;group<4u;++group){int isum=0;
+        for(uint word=0u;word<8u;++word)
+            isum+=dotPacked4x8EXT(int(queries.v[qbase+group*8u+word]),
+                                 int(keys.v[kbase+group*8u+word]));
+        float qs=uintBitsToFloat(((qexp>>(group*8u))&255u)<<23u);
+        float ks=uintBitsToFloat(((kexp>>(group*8u))&255u)<<23u);
+        dotv+=float(isum)*0.25*qs*ks;}
+    float contribution=max(dotv,0.0)*weights.v[head];
+    float total=subgroupAdd(contribution);if(head==0u)scores.v[position]=total;
+}

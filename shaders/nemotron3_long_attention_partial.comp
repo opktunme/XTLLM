@@ -1,0 +1,37 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Q{float v[];}q;
+layout(set=0,binding=1,std430) readonly buffer C{uint v[];}cache;
+layout(set=0,binding=2,std430) writeonly buffer O{float v[];}partial;
+layout(push_constant) uniform P{uint position;uint max_context;uint chunk_size;uint chunks;}p;
+const uint HD=128u,KVH=2u,QH=32u,STRIDE=130u;
+shared float tile_k[HD]; shared float tile_v[HD];
+float from_bf16(uint b){return uintBitsToFloat(b<<16u);}
+void main(){
+    uint lane=gl_LocalInvocationID.x;
+    uint chunk=gl_WorkGroupID.x/QH, head=gl_WorkGroupID.x%QH;
+    uint kv=head/(QH/KVH), begin=chunk*p.chunk_size;
+    uint end=min(min(begin+p.chunk_size,p.position+1u),p.max_context);
+    const uint pairs=HD/2u,value_base=p.max_context*KVH*pairs;
+    float maximum=-3.402823466e38,denominator=0.0,o0=0.0,o1=0.0;
+    for(uint t=begin;t<end;++t){
+        uint packed=cache.v[(t*KVH+kv)*pairs+lane];
+        tile_k[lane*2u]=from_bf16(packed&0xffffu);
+        tile_k[lane*2u+1u]=from_bf16(packed>>16u);
+        packed=cache.v[value_base+(t*KVH+kv)*pairs+lane];
+        tile_v[lane*2u]=from_bf16(packed&0xffffu);
+        tile_v[lane*2u+1u]=from_bf16(packed>>16u);
+        barrier();
+        float dot=q.v[head*HD+lane]*tile_k[lane]
+            +q.v[head*HD+lane+64u]*tile_k[lane+64u];
+        float score=subgroupAdd(dot)*0.0883883476483;
+        float next=max(maximum,score),old=exp(maximum-next),add=exp(score-next);
+        denominator=denominator*old+add;
+        o0=o0*old+add*tile_v[lane]; o1=o1*old+add*tile_v[lane+64u];
+        maximum=next; barrier();
+    }
+    uint base=(chunk*QH+head)*STRIDE;
+    if(lane==0u){partial.v[base]=maximum;partial.v[base+1u]=denominator;}
+    partial.v[base+2u+lane]=o0; partial.v[base+66u+lane]=o1;
+}

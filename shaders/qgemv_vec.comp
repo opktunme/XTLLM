@@ -1,0 +1,50 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// One native 64-lane RDNA2 wave computes eight output channels. Activations
+// are fetched once and reused across all rows; packed INT8 weights are decoded
+// four at a time and the wave reduction stays entirely in registers.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Activations { float values[]; } activations;
+layout(set = 0, binding = 1, std430) readonly buffer PackedWeights { uint values[]; } weights;
+layout(set = 0, binding = 2, std430) readonly buffer WeightScales { float values[]; } scales;
+layout(set = 0, binding = 3, std430) writeonly buffer Output { float values[]; } output_data;
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint columns;
+    uint inner;
+    uint packed_stride;
+} params;
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint first_row = gl_WorkGroupID.x * 8u;
+    float sums[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+    for (uint packed_index = lane; packed_index < params.packed_stride; packed_index += 64u) {
+        const uint k = packed_index * 4u;
+        vec4 input_values = vec4(0.0);
+        if (k < params.inner) input_values.x = activations.values[k];
+        if (k + 1u < params.inner) input_values.y = activations.values[k + 1u];
+        if (k + 2u < params.inner) input_values.z = activations.values[k + 2u];
+        if (k + 3u < params.inner) input_values.w = activations.values[k + 3u];
+        for (uint row = 0; row < 8u; ++row) {
+            const uint output_row = first_row + row;
+            if (output_row < params.columns) {
+                const uint packed = weights.values[output_row * params.packed_stride + packed_index];
+                sums[row] += dot(input_values, unpackSnorm4x8(packed));
+            }
+        }
+    }
+    for (uint row = 0; row < 8u; ++row) sums[row] = subgroupAdd(sums[row]);
+    if (lane == 0u) {
+        for (uint row = 0; row < 8u; ++row) {
+            const uint output_row = first_row + row;
+            if (output_row < params.columns) {
+                output_data.values[output_row] = sums[row] * (127.0 * scales.values[output_row]);
+            }
+        }
+    }
+}

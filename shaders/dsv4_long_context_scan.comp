@@ -1,0 +1,36 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Decode-cost probe for the forked DeepSeek long-context path.  The host
+// buffer is BF16 packed two values per word.  Every workgroup consumes a
+// bounded 32 KiB span and emits one checksum so the compiler cannot discard
+// the measured host-memory traffic or dot-product work.
+layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer ContextData { uint v[]; } data;
+layout(set=0,binding=1,std430) writeonly buffer Checksum { float v[]; } checksum;
+layout(set=0,binding=2,std430) readonly buffer DummyA { uint v; } a;
+layout(set=0,binding=3,std430) readonly buffer DummyB { uint v; } b;
+layout(push_constant) uniform P {
+    uint word_count;
+    uint words_per_group;
+    uint groups_x;
+    uint unused;
+} p;
+
+float from_bf16(uint bits) { return uintBitsToFloat(bits << 16u); }
+
+void main() {
+    uint group = gl_WorkGroupID.x + gl_WorkGroupID.y * p.groups_x;
+    uint begin = group * p.words_per_group;
+    if (begin >= p.word_count) return;
+    uint end = min(begin + p.words_per_group, p.word_count);
+    float sum = 0.0;
+    for (uint i = begin + gl_LocalInvocationID.x; i < end; i += 64u) {
+        uint packed = data.v[i];
+        float lo = from_bf16(packed & 0xffffu);
+        float hi = from_bf16(packed >> 16u);
+        sum = fma(lo, hi + 1.0, sum);
+    }
+    sum = subgroupAdd(sum);
+    if (gl_LocalInvocationID.x == 0u) checksum.v[group] = sum;
+}

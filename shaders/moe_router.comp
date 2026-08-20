@@ -1,0 +1,53 @@
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer RouterWeights { float values[]; } weights;
+layout(set = 0, binding = 2, std430) writeonly buffer RoutingResult { float values[]; } result;
+
+layout(push_constant) uniform Params {
+    uint dimension;
+    uint experts;
+    uint top_k;
+    uint unused;
+} params;
+
+void main() {
+    float logits[16];
+    float maximum = -3.402823466e+38;
+    for (uint expert = 0; expert < params.experts; ++expert) {
+        float value = 0.0;
+        const uint base = expert * params.dimension;
+        for (uint column = 0; column < params.dimension; ++column) {
+            value += input_data.values[column] * weights.values[base + column];
+        }
+        logits[expert] = value;
+        maximum = max(maximum, value);
+    }
+
+    float denominator = 0.0;
+    for (uint expert = 0; expert < params.experts; ++expert) {
+        logits[expert] = exp(logits[expert] - maximum);
+        denominator += logits[expert];
+    }
+    uint first = 0;
+    uint second = 1;
+    if (logits[second] > logits[first]) {
+        uint temporary = first;
+        first = second;
+        second = temporary;
+    }
+    for (uint expert = 2; expert < params.experts; ++expert) {
+        if (logits[expert] > logits[first]) {
+            second = first;
+            first = expert;
+        } else if (logits[expert] > logits[second]) {
+            second = expert;
+        }
+    }
+    const float selected_sum = logits[first] + logits[second];
+    result.values[0] = float(first);
+    result.values[1] = float(second);
+    result.values[2] = logits[first] / selected_sum;
+    result.values[3] = logits[second] / selected_sum;
+}

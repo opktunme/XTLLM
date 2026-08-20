@@ -1,0 +1,91 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
+layout(set=0,binding=0,std430) buffer QueryGate { float v[]; } query_gate;
+layout(set=0,binding=1,std430) buffer Key { float v[]; } key;
+layout(set=0,binding=2,std430) readonly buffer QGamma { float v[]; } qgamma;
+layout(set=0,binding=3,std430) readonly buffer KGamma { float v[]; } kgamma;
+layout(set=0,binding=4,std430) buffer KVCache { uint v[]; } cache;
+layout(set=0,binding=5,std430) readonly buffer Dummy { uint v[]; } dummy;
+layout(push_constant) uniform P {
+    uint position;
+    uint heads;
+    uint rope_pairs;
+    uint max_context;
+} p;
+
+const uint HEAD_DIM = 256u;
+const uint KV_HEADS = 2u;
+
+uint bf16(float x) {
+    uint bits = floatBitsToUint(x);
+    bits += 0x7fffu + ((bits >> 16u) & 1u);
+    return bits >> 16u;
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint head = gl_WorkGroupID.x;
+    if (head < p.heads) {
+        float sum = 0.0;
+        for (uint s = 0u; s < 4u; ++s) {
+            uint d = lane + s * 64u;
+            float x = query_gate.v[head * 512u + d];
+            sum += x * x;
+        }
+        sum = subgroupAdd(sum);
+        float inv = inversesqrt(sum / 256.0 + 1e-6);
+        for (uint s = 0u; s < 4u; ++s) {
+            uint d = lane + s * 64u;
+            query_gate.v[head * 512u + d] *= inv * (qgamma.v[d] + 1.0);
+        }
+    }
+    if (head < KV_HEADS) {
+        float sum = 0.0;
+        for (uint s = 0u; s < 4u; ++s) {
+            uint d = lane + s * 64u;
+            float x = key.v[head * HEAD_DIM + d];
+            sum += x * x;
+        }
+        sum = subgroupAdd(sum);
+        float inv = inversesqrt(sum / 256.0 + 1e-6);
+        for (uint s = 0u; s < 4u; ++s) {
+            uint d = lane + s * 64u;
+            key.v[head * HEAD_DIM + d] *= inv * (kgamma.v[d] + 1.0);
+        }
+    }
+    barrier();
+
+    if (head < p.heads && lane < p.rope_pairs) {
+        uint base = head * 512u;
+        float angle = float(p.position) * pow(10000000.0,
+            -2.0 * float(lane) / float(p.rope_pairs * 2u));
+        float c = cos(angle), s = sin(angle);
+        float a = query_gate.v[base + lane];
+        float b = query_gate.v[base + p.rope_pairs + lane];
+        query_gate.v[base + lane] = a * c - b * s;
+        query_gate.v[base + p.rope_pairs + lane] = b * c + a * s;
+    }
+    if (head < KV_HEADS) {
+        if (lane < p.rope_pairs) {
+            uint base = head * HEAD_DIM;
+            float angle = float(p.position) * pow(10000000.0,
+                -2.0 * float(lane) / float(p.rope_pairs * 2u));
+            float c = cos(angle), s = sin(angle);
+            float a = key.v[base + lane];
+            float b = key.v[base + p.rope_pairs + lane];
+            key.v[base + lane] = a * c - b * s;
+            key.v[base + p.rope_pairs + lane] = b * c + a * s;
+        }
+        barrier();
+        const uint pairs_per_head = HEAD_DIM / 2u;
+        for (uint s = 0u; s < 2u; ++s) {
+            uint pair = lane + s * 64u;
+            uint d = pair * 2u;
+            uint packed = bf16(key.v[head * HEAD_DIM + d]) |
+                          (bf16(key.v[head * HEAD_DIM + d + 1u]) << 16u);
+            cache.v[(p.position * KV_HEADS + head) * pairs_per_head + pair] = packed;
+        }
+    }
+}

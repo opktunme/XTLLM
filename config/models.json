@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "models": [
+    {
+      "key": "qwen36",
+      "aliases": ["qwen35b", "qwen3.6-35b", "Qwen/Qwen3.6-35B-A3B"],
+      "name": "Qwen3.6-35B-A3B",
+      "slug": "qwen3.6-35b-a3b",
+      "repo": "Qwen/Qwen3.6-35B-A3B",
+      "revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+      "download_gib": 67.0,
+      "runtime_gib": 17.7,
+      "scratch_gib": 3.0,
+      "required": [
+        {"path": "model-q4g64.ovs", "min_bytes": 1793560576},
+        {"path": "experts-q4g64.ovx", "min_bytes": 17112764416},
+        {"path": "tokenizer.ovb", "min_bytes": 9791493}
+      ],
+      "conversion": [
+        {
+          "script": "convert_qwen36.py",
+          "when_missing": ["model-q4g64.ovs", "experts-q4g64.ovx", "tokenizer.ovb"],
+          "args": ["--source", "{checkpoint}", "--output", "{runtime}"]
+        }
+      ]
+    },
+    {
+      "key": "nemotron",
+      "aliases": ["nemotron30b", "nemotron3", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4"],
+      "name": "NVIDIA Nemotron-3-Nano-30B-A3B-NVFP4",
+      "slug": "nemotron-3-nano-30b-a3b-nvfp4",
+      "repo": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+      "revision": "ce1b118ae66ec705d02c241525192832eb045fd3",
+      "download_gib": 18.1,
+      "runtime_gib": 18.7,
+      "scratch_gib": 3.0,
+      "required": [
+        {"path": "model-nvfp4.ovs", "min_bytes": 1613701120},
+        {"path": "experts-nvfp4.ovx", "min_bytes": 18365288448},
+        {"path": "tokenizer.ovb", "min_bytes": 7311538}
+      ],
+      "conversion": [
+        {
+          "script": "convert_nemotron3.py",
+          "when_missing": ["tokenizer.ovb"],
+          "args": ["--source", "{checkpoint}", "--output", "{runtime}", "--tokenizer-only"]
+        },
+        {
+          "script": "convert_nemotron3_native.py",
+          "when_missing": ["model-nvfp4.ovs", "experts-nvfp4.ovx"],
+          "args": ["--source", "{checkpoint}", "--output", "{runtime}"]
+        }
+      ]
+    },
+    {
+      "key": "qwen122",
+      "aliases": ["qwen3.5", "qwen3.5-122b", "Qwen/Qwen3.5-122B-A10B"],
+      "name": "Qwen3.5-122B-A10B",
+      "slug": "qwen3.5-122b-a10b",
+      "repo": "Qwen/Qwen3.5-122B-A10B",
+      "revision": "dc4d348443bc740c68e2d77492492c11606384d5",
+      "download_gib": 233.1,
+      "runtime_gib": 61.2,
+      "scratch_gib": 5.0,
+      "required": [
+        {"path": "model-q4g64.ovs", "min_bytes": 4008153088},
+        {"path": "experts-q4g64.ovx", "min_bytes": 61605941248},
+        {"path": "tokenizer.ovb", "min_bytes": 9791487}
+      ],
+      "conversion": [
+        {
+          "script": "convert_qwen35.py",
+          "when_missing": ["model-q4g64.ovs", "experts-q4g64.ovx", "tokenizer.ovb"],
+          "args": ["--source", "{checkpoint}", "--output", "{runtime}"]
+        }
+      ]
+    },
+    {
+      "key": "deepseek",
+      "aliases": ["deepseek-v4", "deepseek-v4-flash", "deepseek-ai/DeepSeek-V4-Flash-0731"],
+      "name": "DeepSeek-V4-Flash-0731",
+      "slug": "deepseek-v4-flash-0731",
+      "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "revision": "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+      "download_gib": 155.5,
+      "runtime_gib": 286.0,
+      "scratch_gib": 8.0,
+      "required": [
+        {"path": "model-q4g64.ovs", "min_bytes": 4414119936},
+        {"path": "experts-q4g64.ovx", "min_bytes": 147169742848},
+        {"path": "tokenizer.ovb", "min_bytes": 4988636}
+      ],
+      "conversion": [
+        {
+          "script": "convert_deepseek_v4.py",
+          "when_missing": ["model.ovs", "experts.ovx", "tokenizer.ovb"],
+          "args": ["--source", "{checkpoint}", "--output", "{runtime}", "--include-indexer"]
+        },
+        {
+          "script": "convert_deepseek_shared_q4g64.py",
+          "when_missing": ["model-q4g64.ovs"],
+          "args": ["{runtime}/model.ovs", "{runtime}/model-q4g64.ovs"]
+        },
+        {
+          "script": "convert_deepseek_experts_q4g64.py",
+          "when_missing": ["experts-q4g64.ovx"],
+          "args": ["--source", "{runtime}/experts.ovx", "--output", "{runtime}/experts-q4g64.ovx", "--full", "--workers", "{workers}"]
+        }
+      ]
+    }
+  ]
+}

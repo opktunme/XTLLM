@@ -1,0 +1,25 @@
+#version 450
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer InputData{float v[];} input_data;
+layout(set=0,binding=1,std430) writeonly buffer OutputData{float v[];} output_data;
+layout(set=0,binding=2,std430) readonly buffer DummyA{uint v;} a;
+layout(set=0,binding=3,std430) readonly buffer DummyB{uint v;} b;
+layout(set=0,binding=4,std430) readonly buffer DummyC{uint v;} c;
+layout(set=0,binding=5,std430) readonly buffer DummyD{uint v;} d;
+layout(push_constant) uniform P{uint position;uint vectors;uint mode;uint unused;} p;
+
+float rope_frequency(uint frequency){
+    const float base=p.mode==0u?10000.0:160000.0,pi=3.14159265358979323846;
+    float value=1.0/pow(base,float(frequency*2u)/64.0);
+    if(p.mode!=0u){float low=max(floor(64.0*log(65536.0/(32.0*2.0*pi))/(2.0*log(base))),0.0);
+        float high=min(ceil(64.0*log(65536.0/(2.0*pi))/(2.0*log(base))),63.0);
+        float blend=1.0-clamp((float(frequency)-low)/(high-low),0.0,1.0);value=value/16.0*(1.0-blend)+value*blend;}
+    return value;
+}
+void main(){uint head=gl_WorkGroupID.x,lane=gl_LocalInvocationID.x;if(head>=p.vectors)return;uint base=head*512u;
+    for(uint s=0u;s<7u;++s){uint d=lane+s*64u;output_data.v[base+d]=input_data.v[base+d];}
+    uint d=448u+lane,ro=lane,pair=448u+(ro^1u),f=ro>>1u;float x=input_data.v[base+d],y=input_data.v[base+pair];
+    float angle=-float(p.position)*rope_frequency(f),co=cos(angle),si=sin(angle);
+    output_data.v[base+d]=(ro&1u)==0u?x*co-y*si:x*co+y*si;
+}

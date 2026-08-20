@@ -1,0 +1,43 @@
+name: XTLLM Windows build
+on:
+  push:
+  pull_request:
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja and Vulkan SDK
+        shell: pwsh
+        run: |
+          choco install ninja vulkan-sdk --no-progress -y
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++.exe
+      - name: Build
+        shell: pwsh
+        run: cmake --build build
+      - name: Validate launcher
+        shell: pwsh
+        run: |
+          python -m py_compile xtllm.py ovllm.py tools/xtllm_chat_server.py tools/ovllm_chat_server.py
+          Get-ChildItem tools/convert_*.py | ForEach-Object { python -m py_compile $_.FullName }
+          python xtllm.py models
+          python xtllm.py setup qwen36 --model-root build/test-models --dry-run
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xtllm-windows
+          path: |
+            build/xtllm.exe
+            build/*.comp.spv
+            xtllm.py
+            xtllm.cmd
+            ovllm.py
+            ovllm.cmd
+            config/models.json
+            tools/convert_*.py
+            tools/xtllm_chat_server.py
+            tools/ovllm_chat_server.py
+            scripts/install-windows.ps1
+            README.md
+            LICENSE

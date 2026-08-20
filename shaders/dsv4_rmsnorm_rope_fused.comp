@@ -1,0 +1,35 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// DeepSeek fixed head geometry: RMSNorm followed by adjacent-pair partial RoPE.
+// One wave owns one 512-wide head. LDS permits race-free in-place output.
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer InputData{float v[];} input_data;
+layout(set=0,binding=1,std430) readonly buffer Gamma{float v[];} gamma_data;
+layout(set=0,binding=2,std430) readonly buffer RopeCos{float v[];} rope_cos;
+layout(set=0,binding=3,std430) readonly buffer RopeSin{float v[];} rope_sin;
+layout(set=0,binding=4,std430) writeonly buffer OutputData{float v[];} output_data;
+layout(push_constant) uniform P{uint epsilon_bits;uint position;uint unused0;uint unused1;} p;
+
+shared float tile[512];
+
+void main(){
+    const uint head=gl_WorkGroupID.x,lane=gl_LocalInvocationID.x,base=head*512u;
+    float square_sum=0.0;
+    for(uint step=0u;step<8u;++step){uint d=lane+step*64u;float x=input_data.v[base+d];tile[d]=x;square_sum+=x*x;}
+    square_sum=subgroupAdd(square_sum);
+    const float inv_rms=inversesqrt(square_sum/512.0+uintBitsToFloat(p.epsilon_bits));
+    barrier();
+    const uint rope_index_base=p.position*32u;
+    for(uint step=0u;step<8u;++step){
+        uint d=lane+step*64u;
+        float x=tile[d]*inv_rms*gamma_data.v[d];
+        if(d>=448u){
+            uint rope_offset=d-448u,pair=448u+(rope_offset^1u),frequency=rope_offset>>1u;
+            float paired=tile[pair]*inv_rms*gamma_data.v[pair];
+            float c=rope_cos.v[rope_index_base+frequency],s=rope_sin.v[rope_index_base+frequency];
+            x=(rope_offset&1u)==0u?x*c-paired*s:x*c+paired*s;
+        }
+        output_data.v[base+d]=x;
+    }
+}

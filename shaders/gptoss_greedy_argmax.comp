@@ -1,0 +1,59 @@
+#version 450
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer Logits { float values[]; } logits;
+layout(set = 0, binding = 1, std430) buffer NextToken { uint value; } next_token;
+layout(set = 0, binding = 2, std430) buffer Workspace { uint values[]; } workspace;
+layout(set = 0, binding = 3, std430) readonly buffer DummyB { uint value; } dummy_b;
+layout(push_constant) uniform Params { uint count; uint groups; uint phase; uint unused; } params;
+
+shared float best_values[64];
+shared uint best_indices[64];
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    float best = -3.402823466e+38;
+    uint index = 0u;
+    if (params.phase == 0u) {
+        for (uint item = gl_WorkGroupID.x * 64u + lane; item < params.count;
+             item += params.groups * 64u) {
+            const float candidate = logits.values[item];
+            if (candidate > best) {
+                best = candidate;
+                index = item;
+            }
+        }
+    } else {
+        for (uint item = lane; item < params.groups; item += 64u) {
+            const float candidate = uintBitsToFloat(workspace.values[item * 2u]);
+            const uint candidate_index = workspace.values[item * 2u + 1u];
+            if (candidate > best || (candidate == best && candidate_index < index)) {
+                best = candidate;
+                index = candidate_index;
+            }
+        }
+    }
+    best_values[lane] = best;
+    best_indices[lane] = index;
+    barrier();
+    for (uint stride = 32u; stride != 0u; stride >>= 1u) {
+        if (lane < stride) {
+            const float other_value = best_values[lane + stride];
+            const uint other_index = best_indices[lane + stride];
+            if (other_value > best_values[lane] ||
+                (other_value == best_values[lane] && other_index < best_indices[lane])) {
+                best_values[lane] = other_value;
+                best_indices[lane] = other_index;
+            }
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        if (params.phase == 0u) {
+            const uint base = gl_WorkGroupID.x * 2u;
+            workspace.values[base] = floatBitsToUint(best_values[0]);
+            workspace.values[base + 1u] = best_indices[0];
+        } else {
+            next_token.value = best_indices[0];
+        }
+    }
+}

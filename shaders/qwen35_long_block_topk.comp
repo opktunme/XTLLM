@@ -1,0 +1,24 @@
+#version 450
+
+layout(local_size_x=64, local_size_y=1, local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Scores { float v[]; } scores;
+layout(set=0,binding=1,std430) writeonly buffer Indices { uint v[]; } indices;
+layout(push_constant) uniform P { uint blocks; uint selected; uint unused0; uint unused1; } p;
+
+void main(){
+    uint kv=gl_WorkGroupID.x;
+    if(kv>=2u||gl_LocalInvocationID.x!=0u)return;
+    float best_score[64]; uint best_index[64];
+    for(uint i=0u;i<64u;++i){best_score[i]=-3.402823466e+38;best_index[i]=0xffffffffu;}
+    for(uint block=0u;block<p.blocks;++block){
+        float value=scores.v[kv*p.blocks+block];
+        uint limit=min(p.selected,64u);
+        for(uint i=0u;i<limit;++i){
+            if(value>best_score[i]||(value==best_score[i]&&block<best_index[i])){
+                for(uint j=limit-1u;j>i;--j){best_score[j]=best_score[j-1u];best_index[j]=best_index[j-1u];}
+                best_score[i]=value;best_index[i]=block;break;
+            }
+        }
+    }
+    for(uint i=0u;i<min(p.selected,64u);++i)indices.v[kv*64u+i]=best_index[i];
+}

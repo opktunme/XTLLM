@@ -1,0 +1,47 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputData { float values[]; } input_data;
+layout(set = 0, binding = 1, std430) readonly buffer Gamma { float values[]; } gamma_data;
+layout(set = 0, binding = 2, std430) writeonly buffer OutputData { float values[]; } output_data;
+layout(set = 0, binding = 3, std430) readonly buffer Beta { float values[]; } beta_data;
+
+layout(push_constant) uniform Params {
+    uint rows;
+    uint columns;
+    float epsilon;
+    uint unused;
+} params;
+
+shared float partial_sum[64];
+shared float partial_square[64];
+
+void main() {
+    const uint row = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    float sum = 0.0;
+    float square_sum = 0.0;
+    for (uint column = lane; column < params.columns; column += 64) {
+        const float value = input_data.values[row * params.columns + column];
+        sum += value;
+        square_sum += value * value;
+    }
+    partial_sum[lane] = sum;
+    partial_square[lane] = square_sum;
+    barrier();
+    for (uint stride = 32; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            partial_sum[lane] += partial_sum[lane + stride];
+            partial_square[lane] += partial_square[lane + stride];
+        }
+        barrier();
+    }
+    const float mean = partial_sum[0] / float(params.columns);
+    const float variance = max(partial_square[0] / float(params.columns) - mean * mean, 0.0);
+    const float inverse_std = inversesqrt(variance + params.epsilon);
+    for (uint column = lane; column < params.columns; column += 64) {
+        const uint index = row * params.columns + column;
+        output_data.values[index] = (input_data.values[index] - mean) * inverse_std *
+                                    gamma_data.values[column] + beta_data.values[column];
+    }
+}

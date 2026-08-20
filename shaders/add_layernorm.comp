@@ -1,0 +1,25 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Left{float values[];}left_data;
+layout(set=0,binding=1,std430) buffer RightAndSum{float values[];}right_sum;
+layout(set=0,binding=2,std430) readonly buffer GammaBeta{float values[];}gamma_beta;
+layout(set=0,binding=3,std430) writeonly buffer Normalized{float values[];}normalized;
+layout(push_constant) uniform Params{uint rows;uint columns;float epsilon;uint unused;}params;
+
+void main(){
+ const uint lane=gl_LocalInvocationID.x;
+ float sum=0.0,square_sum=0.0;
+ for(uint column=lane;column<params.columns;column+=64u){
+  const float value=left_data.values[column]+right_sum.values[column];
+  right_sum.values[column]=value;sum+=value;square_sum+=value*value;
+ }
+ const float mean=subgroupAdd(sum)/float(params.columns);
+ const float variance=max(subgroupAdd(square_sum)/float(params.columns)-mean*mean,0.0);
+ const float inverse_std=inversesqrt(variance+params.epsilon);
+ for(uint column=lane;column<params.columns;column+=64u){
+  normalized.values[column]=(right_sum.values[column]-mean)*inverse_std*
+      gamma_beta.values[column]+gamma_beta.values[params.columns+column];
+ }
+}
