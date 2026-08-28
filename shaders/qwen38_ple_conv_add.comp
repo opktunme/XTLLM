@@ -1,0 +1,9 @@
+#version 450
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Gated { float v[]; } gated;
+layout(set=0,binding=1,std430) readonly buffer Normed { float v[]; } normed;
+layout(set=0,binding=2,std430) readonly buffer Weight { float v[]; } weight;
+layout(set=0,binding=3,std430) buffer State { float v[]; } state;
+layout(set=0,binding=4,std430) buffer Hyper { float v[]; } hyper;
+layout(push_constant) uniform P { uint channels; uint history; uint dilation; uint kernel; } p;
+void main(){uint i=gl_GlobalInvocationID.x;if(i>=p.channels)return;uint base=i*p.history;for(uint j=0u;j+1u<p.history;++j)state.v[base+j]=state.v[base+j+1u];state.v[base+p.history-1u]=normed.v[i];float x=0.0;for(uint k=0u;k<p.kernel;++k)x+=state.v[base+k*p.dilation]*weight.v[i*p.kernel+k];float conv=x/(1.0+exp(-x));hyper.v[i]+=gated.v[i]+conv;}

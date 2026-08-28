@@ -36,11 +36,14 @@ send.onclick=submit;prompt.onkeydown=e=>{if(e.key==='Enter'&&e.ctrlKey){e.preven
 
 class State:
     def __init__(self, engine: Path, runtime: Path, model_name: str,
-                 engine_options: list[str], timeout: int, default_tokens: int):
+                 engine_options: list[str], engine_environment: dict[str, str],
+                 standalone: bool, timeout: int, default_tokens: int):
         self.engine = engine
         self.runtime = runtime
         self.model_name = model_name
         self.engine_options = engine_options
+        self.engine_environment = engine_environment
+        self.standalone = standalone
         self.timeout = timeout
         self.default_tokens = default_tokens
         self.lock = threading.Lock()
@@ -64,19 +67,28 @@ class State:
 
     @staticmethod
     def generated_text(output: str) -> str:
-        end = output.rfind("\ntoken ids:")
         starts = list(re.finditer(r"RAM cache top-off:[^\r\n]*\r?\n", output))
-        if not starts or end < starts[-1].end():
+        if not starts:
             raise RuntimeError("Could not identify generated text in engine output")
-        return output[starts[-1].end():end].strip()
+        start = starts[-1].end()
+        endings = [output.find(marker, start) for marker in
+                   ("\ntoken ids:", "\nmodel:", "\ndecode throughput:")]
+        endings = [position for position in endings if position >= start]
+        if not endings:
+            raise RuntimeError("Could not identify generated text in engine output")
+        return output[start:min(endings)].strip()
 
     def infer(self, messages: list[dict], requested_tokens: int) -> dict[str, str]:
         prompt = self.conversation_prompt(messages)
         tokens = max(8, min(int(requested_tokens or self.default_tokens), 512))
-        command = [str(self.engine), *self.engine_options, "--tokens", str(tokens),
-                   str(self.runtime), prompt]
+        command = ([str(self.engine), str(self.runtime), prompt, str(tokens)]
+                   if self.standalone else
+                   [str(self.engine), *self.engine_options, "--tokens", str(tokens),
+                    str(self.runtime), prompt])
         environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith(("QWEN_", "QWEN36_", "NEMOTRON3_", "DSV4_"))}
+                       if not key.startswith(("QWEN_", "QWEN36_", "QWEN38_",
+                                              "LONGCAT_", "NEMOTRON3_", "DSV4_"))}
+        environment.update(self.engine_environment)
         temporary = self.runtime.parent / "tmp"
         temporary.mkdir(exist_ok=True)
         environment["TEMP"] = environment["TMP"] = str(temporary)
@@ -154,6 +166,8 @@ def main() -> None:
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--engine-option", action="append", default=[])
+    parser.add_argument("--engine-env", action="append", default=[])
+    parser.add_argument("--standalone", action="store_true")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--tokens", type=int, default=128)
@@ -163,8 +177,15 @@ def main() -> None:
     engine, runtime = args.engine.resolve(), args.runtime.resolve()
     if not engine.is_file() or not runtime.is_dir():
         raise SystemExit("Engine or runtime directory is missing")
+    engine_environment: dict[str, str] = {}
+    for item in args.engine_env:
+        key, separator, value = item.partition("=")
+        if not separator or not key:
+            raise SystemExit(f"Invalid --engine-env value: {item}")
+        engine_environment[key] = value
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.state = State(engine, runtime, args.model_name, args.engine_option,
+                         engine_environment, args.standalone,
                          args.timeout, args.tokens)
     url = f"http://{args.host}:{args.port}"
     print(f"XTLLM chat: {url}", flush=True)

@@ -60,22 +60,31 @@ def model_paths(model: dict[str, Any], option: str | None) -> tuple[Path, Path, 
     return base, base / "checkpoint", base / "runtime"
 
 
-def find_engine() -> Path:
+def find_engine(model: dict[str, Any] | None = None) -> Path:
+    executable_name = model.get("backend", "xtllm.exe") if model else "xtllm.exe"
     configured = os.environ.get("XTLLM_ENGINE") or os.environ.get("OVLLM_ENGINE")
-    candidates = ([Path(configured)] if configured else []) + [
-        ROOT / "xtllm.exe",
-        ROOT / "build" / "xtllm.exe",
+    configured_candidates: list[Path] = []
+    if configured:
+        override = Path(configured)
+        configured_candidates.append(
+            override if executable_name == "xtllm.exe" else override.parent / executable_name)
+    candidates = configured_candidates + [
+        ROOT / executable_name,
+        ROOT / "build" / executable_name,
+        ROOT / "dist" / "xtllm" / executable_name,
+    ]
+    if executable_name == "xtllm.exe":
+        candidates += [
         ROOT / "ovllm-longctx.exe",  # legacy package compatibility
         ROOT / "build" / "ovllm-longctx.exe",
         ROOT / "build" / "ovllm_longctx.exe",
-        ROOT / "dist" / "xtllm" / "xtllm.exe",
         ROOT / "dist" / "ovllm-longctx" / "ovllm-longctx.exe",
-    ]
+        ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate.resolve()
     raise UserError(
-        "XTLLM executable was not found. Use a GitHub release package or run "
+        f"XTLLM backend {executable_name} was not found. Use a GitHub release package or run "
         "scripts\\build-windows.ps1. XTLLM_ENGINE can override the path."
     )
 
@@ -281,10 +290,52 @@ def engine_options(args: argparse.Namespace) -> list[str]:
     return result
 
 
+def standalone_settings(model: dict[str, Any], args: argparse.Namespace) -> dict[str, str]:
+    spec = model["standalone"]
+    if getattr(args, "context_gib", None) is not None or \
+            getattr(args, "context_tokens", None) is not None or \
+            getattr(args, "long_mode", "auto") not in (None, "auto"):
+        raise UserError(
+            f"{model['name']} currently exposes its validated short-context path only; "
+            "context and long-mode overrides are not available yet."
+        )
+    result = {
+        spec["ram_env"]: str(getattr(args, "ram_gib", None) or spec["default_ram_gib"]),
+        spec["slots_env"]: str(getattr(args, "device_slots", None) or spec["default_slots"]),
+    }
+    if not getattr(args, "no_prewarm", False):
+        result[spec["prewarm_env"]] = "1"
+    no_think = spec.get("no_think_env")
+    if no_think and not getattr(args, "think", False):
+        result[no_think] = "1"
+    return result
+
+
+def standalone_environment(model: dict[str, Any], args: argparse.Namespace) -> tuple[dict[str, str], dict[str, str]]:
+    spec = model["standalone"]
+    settings = standalone_settings(model, args)
+    environment = os.environ.copy()
+    for key in (spec["ram_env"], spec["slots_env"], spec["prewarm_env"],
+                spec.get("no_think_env")):
+        if key:
+            environment.pop(key, None)
+    environment.update(settings)
+    return environment, settings
+
+
 def command_plan(args: argparse.Namespace) -> int:
     model = find_model(args.model)
     runtime = runtime_for(model, args.model_root)
-    command = [str(find_engine()), *engine_options(args), "--plan", str(runtime)]
+    if "standalone" in model:
+        _, settings = standalone_environment(model, args)
+        print(f"Model: {model['name']}")
+        print(f"Backend: {find_engine(model)}")
+        print(f"Runtime: {runtime}")
+        for key, value in settings.items():
+            print(f"{key}={value}")
+        print("Context: validated short-context backend")
+        return 0
+    command = [str(find_engine(model)), *engine_options(args), "--plan", str(runtime)]
     print(f"> {format_command(command)}", flush=True)
     return subprocess.run(command).returncode
 
@@ -292,21 +343,32 @@ def command_plan(args: argparse.Namespace) -> int:
 def command_run(args: argparse.Namespace) -> int:
     model = find_model(args.model)
     runtime = runtime_for(model, args.model_root)
-    command = [str(find_engine()), *engine_options(args), "--tokens", str(args.tokens),
-               str(runtime), args.prompt]
+    environment = None
+    if "standalone" in model:
+        environment, _ = standalone_environment(model, args)
+        command = [str(find_engine(model)), str(runtime), args.prompt, str(args.tokens)]
+    else:
+        command = [str(find_engine(model)), *engine_options(args), "--tokens", str(args.tokens),
+                   str(runtime), args.prompt]
     print(f"> {format_command(command)}", flush=True)
-    return subprocess.run(command).returncode
+    return subprocess.run(command, env=environment).returncode
 
 
 def command_chat(args: argparse.Namespace) -> int:
     model = find_model(args.model)
     runtime = runtime_for(model, args.model_root)
     server = ROOT / "tools" / "xtllm_chat_server.py"
-    command = [sys.executable, str(server), "--engine", str(find_engine()),
+    command = [sys.executable, str(server), "--engine", str(find_engine(model)),
                "--runtime", str(runtime), "--model-name", model["name"],
                "--port", str(args.port), "--tokens", str(args.tokens)]
-    for value in engine_options(args):
-        command.append(f"--engine-option={value}")
+    if "standalone" in model:
+        _, settings = standalone_environment(model, args)
+        command.append("--standalone")
+        for key, value in settings.items():
+            command.append(f"--engine-env={key}={value}")
+    else:
+        for value in engine_options(args):
+            command.append(f"--engine-option={value}")
     if args.no_browser:
         command.append("--no-browser")
     print(f"> {format_command(command)}", flush=True)

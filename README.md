@@ -16,8 +16,10 @@ the cold remainder on NVMe—while long-context K/V state lives in explicitly
 accounted host memory.
 
 It preserves the proven short-context backends and adds bounded long-context
-execution for Qwen3.5, DeepSeek V4,
-Qwen3.6, and Nemotron 3 Nano. Model weights are **not** included.
+execution for Qwen3.5, DeepSeek V4, Qwen3.6, and Nemotron 3 Nano. The unified
+launcher also ships the retained model-specific Vulkan paths for Qwen3.8 Flash
+Next, Qwen3-Coder-Next, and LongCat Flash Lite Sparse. Model weights are
+**not** included.
 
 > **Status:** Windows/RDNA2 research preview. Greedy text generation is working.
 > The source is intentionally shape-specialized and is not a general model loader.
@@ -72,6 +74,9 @@ AMD, Radeon, and RDNA are trademarks of Advanced Micro Devices, Inc.
 | DeepSeek-V4-Flash-0731 | 284B | ~13B | 6 / 256 | Q4G64T experts/shared; Q8 global/router | ~141.2 GiB |
 | Qwen3.6-35B-A3B | ~35B | ~3B | 8 / 256 | Q4G64T; Q8 embed/head/router | 17.62 GiB |
 | NVIDIA Nemotron-3-Nano-30B-A3B | ~30B | ~3B | 6 / 128 | native E2M1 NVFP4/BF16-K16; Q8 global | 18.61 GiB |
+| Qwen3.8-Flash-Next-FP8 | ~125B | ~6B | 10 / 512 | Q4G64T experts/shared; Q8 global/router; official FP8 PLE | 110.54 GiB |
+| Qwen3-Coder-Next-FP8 | 79.67B | ~3.3B | 10 / 512 | Q4G64T experts/shared; Q8 embed/head/router | 39.73 GiB |
+| LongCat-Flash-Lite-Sparse | ~68.5B | ~3B | 12 / 256 physical + 128 identity | Q4G64T experts; Q8 shared; BF16 n-gram rows | 78.35 GiB |
 
 Vision and draft/MTP namespaces are not executed in these text-only numbers.
 
@@ -87,6 +92,23 @@ budgeted caches. “System RAM” is a profile; the engine budget leaves OS head
 | Nemotron-3-Nano-30B-A3B | 14.53 tok/s | 21.87 tok/s | 21.84 tok/s | 22.08 tok/s | GPU once warm |
 | Qwen3.5-122B-A10B | 3.35 tok/s | 3.96 tok/s | 4.38 tok/s | 4.77 tok/s | expert acquisition/traffic |
 | DeepSeek-V4-Flash-0731 | 1.99 tok/s | 2.60 tok/s | 2.77 tok/s | 2.70 tok/s | expert acquisition/traffic |
+
+The three newer backends were validated separately with 63 timed greedy token
+transitions. Their columns below are explicit model/expert RAM budgets rather
+than installed-system profiles, so they should not be mixed with the table
+above without preserving that distinction.
+
+| Model | 16 GiB model RAM | 24 GiB model RAM | 32 GiB model RAM | Maximum retained profile | Peak VRAM | Primary limit |
+|---|---:|---:|---:|---:|---:|---|
+| Qwen3.8-Flash-Next-FP8 | — | — | — | **5.75 tok/s** at 53 GiB | 10.25 GiB | expert acquisition/H2D |
+| Qwen3-Coder-Next-FP8 | **8.61 tok/s** | **9.18 tok/s** | **9.85 tok/s** | **10.55 tok/s** at 38.27 GiB/all experts | 10.60 GiB | H2D/shared compute once resident |
+| LongCat-Flash-Lite-Sparse | **11.75–11.93 tok/s** | **12.42 tok/s** (all experts) | — | 24 GiB profile already holds all physical experts | 9.66 GiB | H2D/shared compute |
+
+Qwen3.8 was originally measured using the installed-system profiles above:
+4.75 tok/s at a 12 GiB model budget, 5.03 at 20 GiB, 4.97 at 28 GiB, and
+5.75 at 53 GiB. LongCat's faster all-Q4 shared-weight experiment was rejected
+because it produced incorrect repetitive text; the table reports only the
+coherent retained Q8-shared path.
 
 ### Projected effect of more VRAM
 
@@ -174,6 +196,9 @@ expert conversion can be run again safely.
 | `nemotron` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4` | 40 GiB |
 | `qwen122` | `Qwen/Qwen3.5-122B-A10B` | 300 GiB |
 | `deepseek` | `deepseek-ai/DeepSeek-V4-Flash-0731` | 450 GiB |
+| `qwen38` | `Qwen/Qwen3.8-Flash-Next-FP8` | 290 GiB |
+| `qwencoder` | `Qwen/Qwen3-Coder-Next-FP8` | 120 GiB |
+| `longcat` | `meituan-longcat/LongCat-Flash-Lite-Sparse` | 214 GiB |
 
 Set `XTLLM_MODELS` once if you do not want to repeat `--model-root`:
 
@@ -219,7 +244,10 @@ $env:PATH = "C:\llvm-mingw\bin;$env:PATH"
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
-The executable and SPIR-V shaders are written together under `build\`.
+The auto-detecting engine, three shape-specialized native backends, and SPIR-V
+shaders are written together under `build\`. The `xtllm` launcher chooses the
+correct binary internally; users still run the same `xtllm run MODEL` or
+`xtllm chat MODEL` command for every supported checkpoint.
 Converted weights must not be committed; `.gitignore` excludes `.ovs`, `.ovx`,
 and `.ovb` model assets. Keep each checkpoint's license and model-card terms.
 
@@ -257,6 +285,12 @@ when a large maximum window is reserved.
   own the growing K/V cache.
 - **DeepSeek:** MLA/mHC and compressed history use a model-specific indexing
   path; the generic Qwen cache layout is not forced onto it.
+- **Qwen3.8 Flash Next:** four-stream gated residuals, hybrid DeltaNet/full
+  attention, Top-10/512 MoE, and bounded reads from the official FP8 PLE table.
+- **Qwen3-Coder-Next:** its own 48-layer hybrid layout and Top-10/512 expert
+  cache, converted from the official FP8 checkpoint into the retained Q4 path.
+- **LongCat Flash Lite Sparse:** dual attention/dense sublayers, MLA, physical
+  and identity experts, and the checkpoint's BF16 n-gram embedding tables.
 - **Experts:** RAM and VRAM policies stay model-specific. A single generic cache
   policy was deliberately rejected because it regressed proven paths.
 

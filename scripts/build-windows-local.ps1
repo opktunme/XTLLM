@@ -20,6 +20,12 @@ $Shaders = @(
     Get-ChildItem -LiteralPath (Join-Path $Project 'shaders') `
         -Filter 'qwen36_*.comp' -File
     Get-ChildItem -LiteralPath (Join-Path $Project 'shaders') `
+        -Filter 'qwen38_*.comp' -File
+    Get-ChildItem -LiteralPath (Join-Path $Project 'shaders') `
+        -Filter 'qwen_next_*.comp' -File
+    Get-ChildItem -LiteralPath (Join-Path $Project 'shaders') `
+        -Filter 'longcat_*.comp' -File
+    Get-ChildItem -LiteralPath (Join-Path $Project 'shaders') `
         -Filter 'nemotron3_*.comp' -File
     Get-Item -LiteralPath (Join-Path $Project 'shaders\step37_rmsnorm.comp')
     Get-Item -LiteralPath (Join-Path $Project 'shaders\step37_swiglu.comp')
@@ -38,4 +44,22 @@ foreach ($Shader in $Shaders) {
     -o (Join-Path $Build 'xtllm.exe')
 if ($LASTEXITCODE -ne 0) { throw 'XTLLM C++ compilation failed' }
 
-Write-Host "Built XTLLM and $($Shaders.Count) shaders in $Build"
+& $Compiler -std=c++17 -O2 -Wall -Wextra -DNOMINMAX -static `
+    -I $VulkanInclude `
+    (Join-Path $Project 'src\qwen38_flash_next.cpp') `
+    -o (Join-Path $Build 'xtllm-qwen38-flash-next.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Qwen3.8 C++ compilation failed' }
+
+& $Compiler -std=c++17 -O2 -Wall -Wextra -DNOMINMAX -static `
+    -DXTLLM_QWEN3_CODER_NEXT -I $VulkanInclude `
+    (Join-Path $Project 'src\m16_qwen35.cpp') `
+    -o (Join-Path $Build 'xtllm-qwen3-coder-next.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Qwen3-Coder-Next C++ compilation failed' }
+
+& $Compiler -std=c++17 -O2 -Wall -Wextra -DNOMINMAX -static `
+    -I $VulkanInclude `
+    (Join-Path $Project 'src\longcat_flash_lite.cpp') `
+    -o (Join-Path $Build 'xtllm-longcat-flash-lite.exe')
+if ($LASTEXITCODE -ne 0) { throw 'LongCat C++ compilation failed' }
+
+Write-Host "Built XTLLM, three specialized backends, and $($Shaders.Count) shaders in $Build"

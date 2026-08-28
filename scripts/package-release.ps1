@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '0.2.0',
+    [string]$Version = '0.3.0',
     [switch]$SkipBuild
 )
 $ErrorActionPreference = 'Stop'
@@ -32,6 +32,18 @@ if (-not (Test-Path -LiteralPath $Engine)) {
 }
 if (-not (Test-Path -LiteralPath $Engine)) { throw 'Built XTLLM executable was not found.' }
 Copy-Item -LiteralPath $Engine -Destination (Join-Path $Stage 'xtllm.exe')
+$SpecializedBackends = @(
+    'xtllm-qwen38-flash-next.exe',
+    'xtllm-qwen3-coder-next.exe',
+    'xtllm-longcat-flash-lite.exe'
+)
+foreach ($Backend in $SpecializedBackends) {
+    $BackendPath = Join-Path $Build $Backend
+    if (-not (Test-Path -LiteralPath $BackendPath)) {
+        throw "Built XTLLM backend was not found: $Backend"
+    }
+    Copy-Item -LiteralPath $BackendPath -Destination (Join-Path $Stage $Backend)
+}
 Copy-Item -Path (Join-Path $Build '*.comp.spv') -Destination $Stage
 $RootFiles = @(
     'xtllm.py', 'xtllm.cmd', 'ovllm.py', 'ovllm.cmd', 'README.md', 'LICENSE', 'CHANGELOG.md',

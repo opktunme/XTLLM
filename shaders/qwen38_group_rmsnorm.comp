@@ -1,0 +1,9 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer InputData { float v[]; } input_data;
+layout(set=0,binding=1,std430) readonly buffer Gamma { float v[]; } gamma;
+layout(set=0,binding=2,std430) writeonly buffer OutputData { float v[]; } output_data;
+layout(set=0,binding=3,std430) readonly buffer Dummy { uint v; } dummy;
+layout(push_constant) uniform P { uint rows; uint columns; uint epsilon_bits; uint output_offset; } p;
+void main(){uint row=gl_WorkGroupID.x,lane=gl_LocalInvocationID.x;if(row>=p.rows)return;float ss=0.0;for(uint c=lane;c<p.columns;c+=64u){float x=input_data.v[row*p.columns+c];ss+=x*x;}ss=subgroupAdd(ss);float inv=inversesqrt(ss/float(p.columns)+uintBitsToFloat(p.epsilon_bits));for(uint c=lane;c<p.columns;c+=64u){uint i=row*p.columns+c;output_data.v[p.output_offset+i]=input_data.v[i]*inv*(gamma.v[i]+1.0);}}

@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use XTLLM in research, cite this repository and the original model checkpoints."
 title: "XTLLM"
 type: software
-version: 0.1.0
-date-released: 2026-08-16
+version: 0.3.0
+date-released: 2026-08-28
 license: Apache-2.0
 authors:
   - name: "XTLLM contributors"

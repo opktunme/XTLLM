@@ -1,0 +1,11 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Act { uint v[]; } act;
+layout(set=0,binding=1,std430) readonly buffer Expert { uint v[]; } ex;
+layout(set=0,binding=2,std430) readonly buffer Routes { uint v[]; } routes;
+layout(set=0,binding=3,std430) writeonly buffer Out { float v[]; } out_data;
+layout(push_constant) uniform P { uint rank; uint activation_scale_u32; uint unused0; uint unused1; } p;
+const uint EDIM=1024u,GROUPS=48u,WORDS=8u;const uint GATE_S=0u,GATE_W=98304u,UP_S=1671168u,UP_W=1769472u;
+uint sn(uint n){uint b=(n&15u)|((n&240u)<<4u)|((n&3840u)<<8u)|((n&61440u)<<12u);uint s=b&0x08080808u;return b|(s<<1u)|(s<<2u)|(s<<3u)|(s<<4u);}int dq(uint w,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sn(w&65535u)))+dotPacked4x8EXT(int(a1),int(sn(w>>16u)));}float bf(uint o,uint i){uint h=(ex.v[(o>>2u)+(i>>1u)]>>((i&1u)*16u))&65535u;return uintBitsToFloat(h<<16u);}float dotrow(uint wb,uint sb,uint row,uint group,uint frag){uint wi=frag*4u;uint base=(wb>>2u)+row*(GROUPS*WORDS)+wi*GROUPS+group;uint ab=group*16u+wi*2u;int s=dq(ex.v[base],act.v[ab],act.v[ab+1u]);s+=dq(ex.v[base+GROUPS],act.v[ab+2u],act.v[ab+3u]);s+=dq(ex.v[base+2u*GROUPS],act.v[ab+4u],act.v[ab+5u]);s+=dq(ex.v[base+3u*GROUPS],act.v[ab+6u],act.v[ab+7u]);return float(s)*bf(sb,row*GROUPS+group)*uintBitsToFloat(act.v[p.activation_scale_u32+(group>>1u)]);}void main(){uint lane=gl_LocalInvocationID.x,frag=lane&1u,lg=lane>>1u,first=gl_WorkGroupID.x*8u;float g[8]=float[8](0,0,0,0,0,0,0,0),u[8]=float[8](0,0,0,0,0,0,0,0);for(uint group=lg;group<GROUPS;group+=32u)for(uint r=0u;r<8u;++r){uint row=first+r;if(row<EDIM){g[r]+=dotrow(GATE_W,GATE_S,row,group,frag);u[r]+=dotrow(UP_W,UP_S,row,group,frag);}}for(uint r=0u;r<8u;++r){g[r]=subgroupAdd(g[r]);u[r]=subgroupAdd(u[r]);}if(lane==0u)for(uint r=0u;r<8u;++r){uint row=first+r;if(row<EDIM){float x=g[r];out_data.v[p.rank*EDIM+row]=(x/(1.0+exp(-x)))*u[r];}}}

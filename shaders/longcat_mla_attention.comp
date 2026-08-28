@@ -1,0 +1,40 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430)readonly buffer Query{float v[];}q;
+layout(set=0,binding=1,std430)readonly buffer Cache{float v[];}cache;
+layout(set=0,binding=2,std430)writeonly buffer Context{float v[];}ctx;
+layout(set=0,binding=3,std430)readonly buffer Dummy{uint v;}dummy;
+layout(push_constant)uniform P{uint block;uint position;uint max_context;uint unused;}p;
+
+const uint HEADS=32u,QSTRIDE=192u,CSTRIDE=320u;
+const float ATTENTION_SCALE=0.15781141573;
+shared float scores[256];
+
+void main(){
+    uint lane=gl_LocalInvocationID.x,h=gl_WorkGroupID.x;
+    if(h>=HEADS)return;
+    uint count=p.position+1u;
+    float mx=-3.402823466e+38;
+    for(uint t=0u;t<count;++t){
+        uint base=(p.block*p.max_context+t)*HEADS*CSTRIDE+h*CSTRIDE;
+        float dot=0.0;
+        for(uint d=lane;d<192u;d+=64u)dot+=q.v[h*QSTRIDE+d]*cache.v[base+d];
+        dot=subgroupAdd(dot)*ATTENTION_SCALE;
+        if(lane==0u)scores[t]=dot;
+        mx=max(mx,dot);
+    }
+    mx=subgroupMax(mx);
+    barrier();
+    float den=0.0;
+    for(uint t=0u;t<count;++t)den+=exp(scores[t]-mx);
+    for(uint d=lane;d<128u;d+=64u){
+        float s=0.0;
+        for(uint t=0u;t<count;++t){
+            uint base=(p.block*p.max_context+t)*HEADS*CSTRIDE+h*CSTRIDE;
+            s+=exp(scores[t]-mx)/den*cache.v[base+192u+d];
+        }
+        ctx.v[h*128u+d]=s;
+    }
+}

@@ -24,6 +24,24 @@ Desktop display load, SSD temperature, driver version, and cache warmness can
 move short runs. Publish the command, timed-transition count, selected cache
 slots, actual RAM/VRAM, and SSD/H2D traffic with new results.
 
+## XTLLM 0.3.0 backend validation
+
+Qwen3.8 Flash Next, Qwen3-Coder-Next, and LongCat Flash Lite Sparse were run on
+the same RX 6700 XT using greedy decoding and the fixed prompt:
+
+> In two concise paragraphs, explain why the sky appears blue, then give a
+> short Python function that checks whether an integer is prime.
+
+Qwen3-Coder-Next and LongCat figures time 63 output transitions. Qwen3.8's
+profile sweep uses the original three-prompt chat/reasoning/code mix with 23
+timed transitions per prompt. No MTP or speculative tokens are counted. The
+new-backend RAM columns in the README are explicit model/expert budgets, not
+installed-system capacities. The consolidated 0.3.0 binaries passed a final
+uncontended 24 GiB generation check at 4.94 tok/s (Qwen3.8), 8.76 tok/s
+(Qwen3-Coder-Next), and 11.81 tok/s (LongCat), all with coherent output. The
+README retains the longer/profiled headline measurements rather than replacing
+them with this single short release check.
+
 Projected 16/24 GB VRAM figures are documented separately in
 [VRAM_PROJECTIONS.md](VRAM_PROJECTIONS.md). They are capacity-only estimates
 anchored to the measured 12 GB results and must not be reported as benchmarks.

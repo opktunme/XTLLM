@@ -1,0 +1,8 @@
+#version 450
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Block { float v[]; } block_data;
+layout(set=0,binding=1,std430) readonly buffer Injection { float v[]; } injection;
+layout(set=0,binding=2,std430) buffer Hyper { float v[]; } hyper;
+layout(set=0,binding=3,std430) readonly buffer Dummy { uint v; } dummy;
+layout(push_constant) uniform P { uint dimension; uint branches; uint divisor_bits; uint unused1; } p;
+void main(){uint i=gl_GlobalInvocationID.x;if(i<p.dimension*p.branches){uint b=i/p.dimension;float w=2.0/(1.0+exp(-injection.v[b]/uintBitsToFloat(p.divisor_bits)));hyper.v[i]+=block_data.v[i%p.dimension]*w;}}

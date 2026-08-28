@@ -8,141 +8,68 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
-#include <numeric>
 #include <unordered_map>
-#include "expert_acquisition_trace.hpp"
 
-// Qwen3.5-122B-A10B text-only executor.  This is deliberately separate from
+// Qwen3.8-Flash-Next text-only executor.  This is deliberately separate from
 // the retained DeepSeek and Step-3.7 executors.  It reuses their finite Vulkan
 // queues and Q4 expert-acquisition design, but all model math below follows the
-// authoritative Qwen3.5 text architecture.
-namespace qwen35 {
+// authoritative Qwen4-Exp text architecture.  It supports the exact
+// short-context (<= QSA budget) path, where sparse attention selects every
+// causal token, plus four-stream gated residuals and the official FP8 PLE.
+namespace qwen38 {
 
-#ifdef XTLLM_LONGCAT
-constexpr uint32_t kDim = 3072;
-constexpr uint32_t kMoeDim = 1024;
-constexpr uint32_t kLayers = 14;
-constexpr uint32_t kExperts = 256;
-constexpr uint32_t kTopK = 12;
-constexpr uint32_t kVocabulary = 131072;
-constexpr uint32_t kBaseVocabulary = 131072;
-constexpr uint32_t kMerges = 130592;
-constexpr uint32_t kFullLayers = 28;
-constexpr uint32_t kLinearLayers = 1;
-constexpr uint32_t kAttentionHeads = 32;
-constexpr uint32_t kKvHeads = 1;
-constexpr uint32_t kHeadDim = 192;
-constexpr uint32_t kRopeDim = 64;
-constexpr uint32_t kLinearKeyHeads = 1;
-constexpr uint32_t kLinearValueHeads = 1;
-constexpr uint32_t kLinearHeadDim = 128;
-constexpr uint32_t kLinearQkv = 128;
-constexpr uint32_t kLinearValue = 4096;
-constexpr uint32_t kLinearAb = 64;
-constexpr uint32_t kFullQProj = 6144;
-constexpr uint32_t kDeltaParams = 192;
-constexpr uint32_t kMaximumDeviceSlots = 128;
-constexpr uint32_t kConvWidth = 4;
-constexpr uint32_t kMaximumContext = 256;
-
-constexpr uint64_t kHeaderBytes = 4096;
-constexpr uint64_t kGateScale = 0;
-constexpr uint64_t kGateWeight = 98304;
-constexpr uint64_t kUpScale = 1671168;
-constexpr uint64_t kUpWeight = 1769472;
-constexpr uint64_t kDownScale = 3342336;
-constexpr uint64_t kDownWeight = 3440640;
-constexpr uint64_t kExpertRecordBytes = 5013504;
-constexpr uint32_t kEndOfText = 3;
-constexpr uint32_t kImStart = 47;
-constexpr uint32_t kImEnd = 2;
-constexpr uint32_t kThink = 36;
-constexpr uint32_t kEndThink = 37;
-#elif defined(XTLLM_QWEN3_CODER_NEXT)
-constexpr uint32_t kDim = 2048;
-constexpr uint32_t kMoeDim = 512;
+constexpr uint32_t kDim = 2560;
+constexpr uint32_t kHcCount = 4;
+constexpr uint32_t kHcDim = kDim * kHcCount;
+constexpr uint32_t kHcLowrank = 320;
+constexpr uint32_t kMoeDim = 640;
 constexpr uint32_t kLayers = 48;
 constexpr uint32_t kExperts = 512;
 constexpr uint32_t kTopK = 10;
-constexpr uint32_t kVocabulary = 151936;
-constexpr uint32_t kBaseVocabulary = 151643;
-constexpr uint32_t kMerges = 151387;
-constexpr uint32_t kFullLayers = 12;
-constexpr uint32_t kLinearLayers = 36;
-constexpr uint32_t kAttentionHeads = 16;
-constexpr uint32_t kKvHeads = 2;
-constexpr uint32_t kHeadDim = 256;
-constexpr uint32_t kRopeDim = 64;
-constexpr uint32_t kLinearKeyHeads = 16;
-constexpr uint32_t kLinearValueHeads = 32;
-constexpr uint32_t kLinearHeadDim = 128;
-constexpr uint32_t kLinearQkv = 8192;
-constexpr uint32_t kLinearValue = 4096;
-constexpr uint32_t kLinearAb = 64;
-constexpr uint32_t kFullQProj = 8192;
-constexpr uint32_t kDeltaParams = 192;
-constexpr uint32_t kMaximumDeviceSlots = 128;
-constexpr uint32_t kConvWidth = 4;
-constexpr uint32_t kMaximumContext = 2048;
-
-constexpr uint64_t kHeaderBytes = 4096;
-constexpr uint64_t kGateScale = 0;
-constexpr uint64_t kGateWeight = 32768;
-constexpr uint64_t kUpScale = 557056;
-constexpr uint64_t kUpWeight = 589824;
-constexpr uint64_t kDownScale = 1114112;
-constexpr uint64_t kDownWeight = 1146880;
-constexpr uint64_t kExpertRecordBytes = 1671168;
-static_assert(kExpertRecordBytes % 4096 == 0);
-
-constexpr uint32_t kEndOfText = 151643;
-constexpr uint32_t kImStart = 151644;
-constexpr uint32_t kImEnd = 151645;
-constexpr uint32_t kThink = 151667;
-constexpr uint32_t kEndThink = 151668;
-#else
-constexpr uint32_t kDim = 3072;
-constexpr uint32_t kMoeDim = 1024;
-constexpr uint32_t kLayers = 48;
-constexpr uint32_t kExperts = 256;
-constexpr uint32_t kTopK = 8;
 constexpr uint32_t kVocabulary = 248320;
 constexpr uint32_t kBaseVocabulary = 248044;
-constexpr uint32_t kMerges = 247587;
 constexpr uint32_t kFullLayers = 12;
 constexpr uint32_t kLinearLayers = 36;
-constexpr uint32_t kAttentionHeads = 32;
+constexpr uint32_t kAttentionHeads = 24;
 constexpr uint32_t kKvHeads = 2;
 constexpr uint32_t kHeadDim = 256;
 constexpr uint32_t kRopeDim = 64;
 constexpr uint32_t kLinearKeyHeads = 16;
-constexpr uint32_t kLinearValueHeads = 64;
+constexpr uint32_t kLinearValueHeads = 48;
 constexpr uint32_t kLinearHeadDim = 128;
-constexpr uint32_t kLinearQkv = 12288;
-constexpr uint32_t kLinearValue = 8192;
-constexpr uint32_t kLinearAb = 128;
-constexpr uint32_t kFullQProj = 16384;
-constexpr uint32_t kDeltaParams = 256;
-constexpr uint32_t kMaximumDeviceSlots = 32;
+constexpr uint32_t kLinearQkv = 10240;
+constexpr uint32_t kLinearValue = 6144;
 constexpr uint32_t kConvWidth = 4;
+#ifdef OVLLM_LONG_CONTEXT_FORK
+constexpr uint32_t kDefaultContext = 2048;
+constexpr uint32_t kAttentionChunk = 1024;
+constexpr uint32_t kAttentionPartialStride = kHeadDim + 2;
+#else
 constexpr uint32_t kMaximumContext = 2048;
+#endif
 
 constexpr uint64_t kHeaderBytes = 4096;
 constexpr uint64_t kGateScale = 0;
-constexpr uint64_t kGateWeight = 98304;
-constexpr uint64_t kUpScale = 1671168;
-constexpr uint64_t kUpWeight = 1769472;
-constexpr uint64_t kDownScale = 3342336;
-constexpr uint64_t kDownWeight = 3440640;
-constexpr uint64_t kExpertRecordBytes = 5013504;
+constexpr uint64_t kGateWeight = 51200;
+constexpr uint64_t kUpScale = 870400;
+constexpr uint64_t kUpWeight = 921600;
+constexpr uint64_t kDownScale = 1740800;
+constexpr uint64_t kDownWeight = 1792000;
+constexpr uint64_t kExpertRecordBytes = 2613248;
 static_assert(kExpertRecordBytes % 4096 == 0);
+
+constexpr uint32_t kPleParts = 128;
+constexpr uint32_t kPleRowsPerPart = 2500012;
+constexpr uint32_t kPleRowBytes = 160;
+constexpr uint64_t kPleRows = uint64_t(kPleParts) * kPleRowsPerPart;
+constexpr uint32_t kPleHeads = 16;
+constexpr uint32_t kPleHistory = 10;
 
 constexpr uint32_t kEndOfText = 248044;
 constexpr uint32_t kImStart = 248045;
 constexpr uint32_t kImEnd = 248046;
 constexpr uint32_t kThink = 248068;
 constexpr uint32_t kEndThink = 248069;
-#endif
 
 using dsv4::ExpertHeader;
 using dsv4::GroupEntry;
@@ -176,34 +103,22 @@ static void read_at(std::ifstream& input, uint64_t offset, void* output,
 
 class SharedIndex {
 public:
-    explicit SharedIndex(const std::filesystem::path& path,
-                         bool mtp_container = false) : path_(path) {
+    explicit SharedIndex(const std::filesystem::path& path) : path_(path) {
         std::ifstream input(path, std::ios::binary);
         if (!input) throw std::runtime_error("Could not open Qwen shared container");
         read_at(input, 0, &header_, sizeof(header_), "header");
-#ifdef XTLLM_LONGCAT
-        const char* expected_magic = "OLCFSHR\0";
-        if (mtp_container) throw std::runtime_error("LongCat has no retained MTP container");
-#elif defined(XTLLM_QWEN3_CODER_NEXT)
-        const char* expected_magic = "OQN3SHR\0";
-        if (mtp_container) throw std::runtime_error("Qwen3-Coder-Next has no retained MTP container");
-#else
-        const char* expected_magic = mtp_container ? "OQ35MTP\0" : "OQ35SHR\0";
-#endif
-        const uint32_t expected_layers = mtp_container ? 1u : kLayers;
-        if (std::memcmp(header_.magic, expected_magic, 8) != 0 ||
+        if (std::memcmp(header_.magic, "OQ38SHR\0", 8) != 0 ||
             header_.version != 1 || header_.header_bytes != kHeaderBytes ||
             header_.tensor_entry_bytes != sizeof(TensorEntry) ||
             header_.dimension != kDim || header_.moe_dimension != kMoeDim ||
-            header_.layers != expected_layers || header_.heads != kAttentionHeads ||
+            header_.layers != kLayers || header_.heads != kAttentionHeads ||
             header_.kv_heads != kKvHeads || header_.head_dimension != kHeadDim ||
             header_.vocabulary != kVocabulary || header_.experts != kExperts ||
             header_.top_k != kTopK ||
             header_.expert_record_bytes != kExpertRecordBytes)
-            throw std::runtime_error("Unsupported Qwen3.5 shared container");
+            throw std::runtime_error("Unsupported Qwen3.8 shared container");
         const uint64_t actual = std::filesystem::file_size(path);
-        if (header_.file_bytes != actual ||
-            header_.group_count != uint64_t(expected_layers) + 1u ||
+        if (header_.file_bytes != actual || header_.group_count != kLayers + 1 ||
             header_.tensor_count == 0 || header_.tensor_count > 4096)
             throw std::runtime_error("Invalid Qwen shared container bounds");
         groups_.resize(static_cast<size_t>(header_.group_count));
@@ -285,6 +200,128 @@ static void read_unbuffered(HANDLE file, uint64_t offset, void* destination,
     }
 }
 
+#pragma pack(push, 1)
+struct PleHeader {
+    char magic[8];
+    uint32_t version, header_bytes, parts, rows_per_part;
+    uint32_t row_bytes, total_rows, scale_bits, reserved;
+    uint64_t data_offset, data_bytes, file_bytes, revision;
+    uint64_t reserved_qword[4];
+};
+#pragma pack(pop)
+static_assert(sizeof(PleHeader) == 104);
+
+class PleLookup {
+public:
+    explicit PleLookup(const std::filesystem::path& path) {
+        std::ifstream metadata(path, std::ios::binary);
+        if (!metadata) throw std::runtime_error("Could not open Qwen3.8 PLE table");
+        metadata.read(reinterpret_cast<char*>(&header_), sizeof(header_));
+        if (!metadata || std::memcmp(header_.magic, "OQ38PLE\0", 8) != 0 ||
+            header_.version != 1 || header_.header_bytes != kHeaderBytes ||
+            header_.parts != kPleParts ||
+            header_.rows_per_part != kPleRowsPerPart ||
+            header_.row_bytes != kPleRowBytes ||
+            header_.total_rows != kPleRows ||
+            header_.data_offset != kHeaderBytes ||
+            header_.file_bytes != std::filesystem::file_size(path))
+            throw std::runtime_error("Unsupported Qwen3.8 PLE table");
+        std::memcpy(&scale_, &header_.scale_bits, sizeof(scale_));
+        file_ = open_unbuffered(path);
+        aligned_ = static_cast<uint8_t*>(VirtualAlloc(
+            nullptr, 8192, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+        if (!aligned_) {
+            CloseHandle(file_);
+            file_ = INVALID_HANDLE_VALUE;
+            throw std::runtime_error("Could not allocate aligned PLE read buffer");
+        }
+        make_fp8_table();
+    }
+
+    ~PleLookup() {
+        if (file_ != INVALID_HANDLE_VALUE) CloseHandle(file_);
+        if (aligned_) VirtualFree(aligned_, 0, MEM_RELEASE);
+    }
+
+    void lookup(uint32_t token, float* output) {
+        const uint32_t previous1 = history_size_ >= 1 ? history_[history_size_ - 1] : kEndOfText;
+        const uint32_t previous2 = history_size_ >= 2 ? history_[history_size_ - 2] : kEndOfText;
+        const std::array<uint32_t, 3> tokens{token, previous1, previous2};
+        for (uint32_t head = 0; head < kPleHeads; ++head) {
+            const uint32_t order = head < 8 ? 2u : 3u;
+            uint64_t mixed = 0;
+            for (uint32_t position = 0; position < order; ++position)
+                mixed ^= uint64_t(tokens[position]) * kMultipliers[position];
+            int64_t signed_mixed = 0;
+            std::memcpy(&signed_mixed, &mixed, sizeof(mixed));
+            int64_t remainder = signed_mixed % int64_t(kVocabSizes[head]);
+            if (remainder < 0) remainder += kVocabSizes[head];
+            const uint64_t row = kOffsets[head] + uint64_t(remainder);
+            read_row(row, output + head * kPleRowBytes);
+        }
+        if (token == kEndOfText) {
+            history_size_ = 0;
+        } else if (history_size_ < history_.size()) {
+            history_[history_size_++] = token;
+        } else {
+            history_[0] = history_[1];
+            history_[1] = token;
+        }
+    }
+
+    uint64_t bytes_read() const { return bytes_read_; }
+    void reset_metrics() { bytes_read_ = 0; }
+
+private:
+    void make_fp8_table() {
+        for (uint32_t encoded = 0; encoded < 256; ++encoded) {
+            const float sign = (encoded & 0x80u) ? -1.0f : 1.0f;
+            const uint32_t exponent = (encoded >> 3u) & 15u;
+            const uint32_t mantissa = encoded & 7u;
+            float value = 0;
+            if (exponent == 0)
+                value = (float(mantissa) / 8.0f) * std::ldexp(1.0f, -6);
+            else if (exponent == 15 && mantissa == 7)
+                value = 0; // Checkpoint contains finite weights; keep NaN defensive.
+            else
+                value = (1.0f + float(mantissa) / 8.0f) *
+                    std::ldexp(1.0f, int(exponent) - 7);
+            fp8_[encoded] = sign * value * scale_;
+        }
+    }
+
+    void read_row(uint64_t row, float* output) {
+        if (row >= kPleRows) throw std::runtime_error("PLE row out of range");
+        const uint64_t offset = header_.data_offset + row * kPleRowBytes;
+        const uint64_t aligned_offset = offset & ~uint64_t(4095);
+        const uint32_t within = static_cast<uint32_t>(offset - aligned_offset);
+        const uint64_t bytes = (uint64_t(within) + kPleRowBytes + 4095) & ~uint64_t(4095);
+        read_unbuffered(file_, aligned_offset, aligned_, bytes);
+        bytes_read_ += bytes;
+        for (uint32_t i = 0; i < kPleRowBytes; ++i)
+            output[i] = fp8_[aligned_[within + i]];
+    }
+
+    inline static constexpr std::array<uint64_t, 3> kMultipliers{
+        23703573157769ull, 20109073645365ull, 8052911324071ull};
+    inline static constexpr std::array<uint32_t, 16> kVocabSizes{
+        20000003u,20000023u,20000033u,20000047u,20000059u,20000063u,
+        20000069u,20000077u,20000081u,20000093u,20000107u,20000147u,
+        20000153u,20000159u,20000161u,20000171u};
+    inline static constexpr std::array<uint64_t, 16> kOffsets{
+        0ull,20000003ull,40000026ull,60000059ull,80000106ull,100000165ull,
+        120000228ull,140000297ull,160000374ull,180000455ull,200000548ull,
+        220000655ull,240000802ull,260000955ull,280001114ull,300001275ull};
+    PleHeader header_{};
+    HANDLE file_ = INVALID_HANDLE_VALUE;
+    uint8_t* aligned_ = nullptr;
+    float scale_ = 0;
+    std::array<float, 256> fp8_{};
+    std::array<uint32_t, 2> history_{};
+    uint32_t history_size_ = 0;
+    uint64_t bytes_read_ = 0;
+};
+
 class DeviceWeights {
 public:
     DeviceWeights(const Runtime& runtime, const SharedIndex& index)
@@ -365,20 +402,10 @@ public:
             header_.version != 2 || header_.header_bytes != sizeof(TokenizerHeader) ||
             header_.vocabulary != kVocabulary ||
             header_.base_vocabulary != kBaseVocabulary ||
-            header_.merge_count != kMerges ||
-#ifdef XTLLM_LONGCAT
-            header_.bos != 1u ||
-#else
-            header_.bos != UINT32_MAX ||
-#endif
+            header_.merge_count != 247587 || header_.bos != UINT32_MAX ||
             header_.eos != kImEnd || header_.configured_pad != kEndOfText ||
             header_.pad_piece != kEndOfText || header_.user != kImStart ||
-#ifdef XTLLM_LONGCAT
-            header_.assistant != 48u ||
-#else
-            header_.assistant != kImEnd ||
-#endif
-            header_.think != kThink ||
+            header_.assistant != kImEnd || header_.think != kThink ||
             header_.end_think != kEndThink ||
             header_.token_entry_bytes != sizeof(TokenEntry) ||
             header_.merge_entry_bytes != sizeof(MergeEntry) ||
@@ -475,9 +502,6 @@ public:
         text("\n");
         result.push_back(kImStart);
         text("assistant\n");
-#if defined(XTLLM_QWEN3_CODER_NEXT) || defined(XTLLM_LONGCAT)
-        (void)thinking;
-#else
         result.push_back(kThink);
         if (thinking) {
             text("\n");
@@ -486,7 +510,6 @@ public:
             result.push_back(kEndThink);
             text("\n\n");
         }
-#endif
         return result;
     }
 
@@ -611,28 +634,12 @@ public:
         uint32_t remaining = 0;
         bool active = false;
     };
-    struct SplitBatch {
-        std::array<OVERLAPPED, 2 * kTopK> operations{};
-        std::array<HANDLE, 2 * kTopK> events{};
-        std::array<uint32_t, 2 * kTopK> ranks{};
-        std::array<uint8_t, 2 * kTopK> parts{};
-        std::array<uint32_t, 2 * kTopK> bytes{};
-        std::array<bool, 2 * kTopK> pending{};
-        uint32_t count = 0, remaining = 0;
-        bool active = false;
-    };
 
     explicit ExpertFile(const std::filesystem::path& path) : path_(path) {
         std::ifstream input(path, std::ios::binary);
         if (!input) throw std::runtime_error("Could not open Qwen expert container");
         read_at(input, 0, &header_, sizeof(header_), "expert header");
-#ifdef XTLLM_LONGCAT
-        if (std::memcmp(header_.magic, "OLCFEXP\0", 8) != 0 ||
-#elif defined(XTLLM_QWEN3_CODER_NEXT)
-        if (std::memcmp(header_.magic, "OQN3EXP\0", 8) != 0 ||
-#else
-        if (std::memcmp(header_.magic, "OQ35EXP\0", 8) != 0 ||
-#endif
+        if (std::memcmp(header_.magic, "OQ38EXP\0", 8) != 0 ||
             header_.version != 1 || header_.header_bytes != kHeaderBytes ||
             header_.dimension != kDim || header_.moe_dimension != kMoeDim ||
             header_.layers != kLayers || header_.experts != kExperts ||
@@ -779,85 +786,6 @@ public:
         batch = {};
     }
 
-    void begin_split(const std::vector<uint64_t>& offsets,
-                     const std::vector<void*>& destinations,
-                     const std::vector<uint32_t>& ranks,
-                     SplitBatch& batch) {
-        if (batch.active || offsets.size() != destinations.size() ||
-            offsets.size() != ranks.size() || offsets.size() > kTopK)
-            throw std::runtime_error("Invalid split Qwen expert batch");
-        batch = {};
-        batch.count = static_cast<uint32_t>(offsets.size()) * 2u;
-        batch.remaining = batch.count;
-        batch.active = true;
-        try {
-            for (uint32_t item = 0; item < offsets.size(); ++item) {
-                for (uint32_t part = 0; part < 2; ++part) {
-                    const uint32_t index = item * 2u + part;
-                    const uint64_t relative = part ? kDownScale : 0;
-                    const uint32_t bytes = static_cast<uint32_t>(
-                        part ? kExpertRecordBytes - kDownScale : kDownScale);
-                    batch.events[index] =
-                        CreateEventW(nullptr, TRUE, FALSE, nullptr);
-                    if (!batch.events[index])
-                        throw std::runtime_error("Qwen split event creation failed");
-                    const uint64_t offset = offsets[item] + relative;
-                    batch.operations[index].Offset = DWORD(offset);
-                    batch.operations[index].OffsetHigh = DWORD(offset >> 32);
-                    batch.operations[index].hEvent = batch.events[index];
-                    batch.ranks[index] = ranks[item];
-                    batch.parts[index] = static_cast<uint8_t>(part);
-                    batch.bytes[index] = bytes;
-                    batch.pending[index] = true;
-                    const BOOL started = ReadFile(file_,
-                        static_cast<uint8_t*>(destinations[item]) + relative,
-                        bytes, nullptr, &batch.operations[index]);
-                    if (!started && GetLastError() != ERROR_IO_PENDING)
-                        throw std::runtime_error("Qwen split read submission failed");
-                }
-            }
-        } catch (...) {
-            for (uint32_t i = 0; i < batch.count; ++i) {
-                if (batch.pending[i]) CancelIoEx(file_, &batch.operations[i]);
-                if (batch.events[i]) CloseHandle(batch.events[i]);
-            }
-            batch = {};
-            throw;
-        }
-    }
-
-    std::pair<uint32_t, uint32_t> wait_any_split(SplitBatch& batch) {
-        if (!batch.active || !batch.remaining)
-            throw std::runtime_error("No Qwen split read pending");
-        std::array<HANDLE, 2 * kTopK> events{};
-        std::array<uint32_t, 2 * kTopK> indices{};
-        uint32_t count = 0;
-        for (uint32_t i = 0; i < batch.count; ++i) if (batch.pending[i]) {
-            events[count] = batch.events[i];
-            indices[count++] = i;
-        }
-        const DWORD waited = WaitForMultipleObjects(count, events.data(), FALSE,
-                                                     10000);
-        if (waited < WAIT_OBJECT_0 || waited >= WAIT_OBJECT_0 + count)
-            throw std::runtime_error("Qwen split expert read timed out");
-        const uint32_t index = indices[waited - WAIT_OBJECT_0];
-        DWORD transferred = 0;
-        if (!GetOverlappedResult(file_, &batch.operations[index], &transferred,
-                                 FALSE) || transferred != batch.bytes[index])
-            throw std::runtime_error("Qwen split expert read failed");
-        batch.pending[index] = false;
-        --batch.remaining;
-        return {batch.ranks[index], batch.parts[index]};
-    }
-
-    void finish_split(SplitBatch& batch) {
-        if (!batch.active || batch.remaining)
-            throw std::runtime_error("Qwen split batch incomplete");
-        for (uint32_t i = 0; i < batch.count; ++i)
-            if (batch.events[i]) CloseHandle(batch.events[i]);
-        batch = {};
-    }
-
 private:
     std::filesystem::path path_;
     ExpertHeader header_{};
@@ -877,20 +805,9 @@ public:
         std::array<bool, kTopK> disk_pending{};
         bool active = false;
     };
-    struct SplitProgressiveBatch {
-        Batch sources{};
-        ExpertFile::SplitBatch reads{};
-        bool active = false;
-    };
-    struct Many {
-        std::array<const uint8_t*, 2 * kTopK> pointers{};
-        uint32_t count = 0;
-        uint32_t disk_reads = 0;
-    };
 
     HostExpertCache(ExpertFile& file, uint64_t budget_bytes) : file_(file) {
-        tiny_lfu_ = std::getenv("QWEN_HOST_TINYLFU") != nullptr;
-        lru_ = std::getenv("QWEN_HOST_LRU") != nullptr;
+        tiny_lfu_ = std::getenv("QWEN38_HOST_TINYLFU") != nullptr;
         const uint64_t reserve = budget_bytes > 512ull * 1024 * 1024
             ? budget_bytes - 512ull * 1024 * 1024 : 0;
         slots_ = static_cast<uint32_t>(std::min<uint64_t>(
@@ -932,19 +849,6 @@ public:
         batch.active = true;
     }
 
-    void begin_progressive_split(
-        uint32_t layer, const std::array<uint32_t, kTopK>& experts,
-        const std::array<bool, kTopK>& needed,
-        const std::array<void*, kTopK>& direct_destinations,
-        SplitProgressiveBatch& batch) {
-        if (batch.active)
-            throw std::runtime_error("Nested Qwen split acquisition");
-        batch = {};
-        batch.sources = resolve_batch_impl(layer, experts, needed,
-            direct_destinations, nullptr, nullptr, &batch.reads);
-        batch.active = true;
-    }
-
     uint32_t wait_next_disk(ProgressiveBatch& batch) {
         if (!batch.active || !batch.reads.remaining)
             throw std::runtime_error("No Qwen progressive disk rank pending");
@@ -958,18 +862,6 @@ public:
     void finish_progressive(ProgressiveBatch& batch) {
         if (!batch.active) return;
         file_.finish_batch(batch.reads);
-        batch.active = false;
-    }
-
-    std::pair<uint32_t, uint32_t> wait_next_split(
-        SplitProgressiveBatch& batch) {
-        if (!batch.active) throw std::runtime_error("No Qwen split batch");
-        return file_.wait_any_split(batch.reads);
-    }
-
-    void finish_progressive_split(SplitProgressiveBatch& batch) {
-        if (!batch.active) return;
-        file_.finish_split(batch.reads);
         batch.active = false;
     }
 
@@ -1047,83 +939,12 @@ public:
         return added;
     }
 
-    Many resolve_many(uint32_t layer,
-                      const std::array<uint32_t, 2 * kTopK>& experts,
-                      uint32_t count) {
-        if (count > 2 * kTopK) throw std::runtime_error("Too many Qwen experts");
-        Many result{};
-        result.count = count;
-        std::vector<bool> reserved(slots_);
-        std::vector<uint64_t> offsets;
-        std::vector<void*> destinations;
-        const auto flush_reads = [&]() {
-            if (offsets.empty()) return;
-            file_.read_batch(offsets, destinations);
-            result.disk_reads += static_cast<uint32_t>(offsets.size());
-            disk_bytes_ += uint64_t(offsets.size()) * kExpertRecordBytes;
-            offsets.clear();
-            destinations.clear();
-        };
-        for (uint32_t index = 0; index < count; ++index) {
-            const uint32_t expert = experts[index];
-            const uint32_t key = layer * kExperts + expert;
-            ++frequency_[key];
-            const int32_t location = locations_[key];
-            if (location >= 0) {
-                ++hits_;
-                entries_[location].age = ++clock_;
-                reserved[location] = true;
-                result.pointers[index] =
-                    base_ + uint64_t(location) * kExpertRecordBytes;
-                continue;
-            }
-            ++misses_;
-            uint32_t victim = UINT32_MAX;
-            for (uint32_t slot = 0; slot < slots_; ++slot) {
-                if (reserved[slot]) continue;
-                bool replace = victim == UINT32_MAX || entries_[slot].key < 0;
-                if (!replace && entries_[victim].key >= 0) {
-                    replace = lru_ ? entries_[slot].age < entries_[victim].age :
-                        (frequency_[entries_[slot].key] <
-                             frequency_[entries_[victim].key] ||
-                         (frequency_[entries_[slot].key] ==
-                              frequency_[entries_[victim].key] &&
-                          entries_[slot].age < entries_[victim].age));
-                }
-                if (replace) { victim = slot; if (entries_[slot].key < 0) break; }
-            }
-            if (victim == UINT32_MAX)
-                throw std::runtime_error("No Qwen many-cache victim");
-            Entry& entry = entries_[victim];
-            if (entry.key >= 0) locations_[entry.key] = -1;
-            uint8_t* pointer = base_ + uint64_t(victim) * kExpertRecordBytes;
-            if (!entry.committed) {
-                if (!VirtualAlloc(pointer, kExpertRecordBytes, MEM_COMMIT,
-                                  PAGE_READWRITE))
-                    throw std::runtime_error("Qwen many-cache commit failed");
-                entry.committed = true;
-                ++committed_;
-            }
-            entry.key = static_cast<int32_t>(key);
-            entry.age = ++clock_;
-            locations_[key] = static_cast<int32_t>(victim);
-            reserved[victim] = true;
-            result.pointers[index] = pointer;
-            offsets.push_back(file_.offset(layer, expert));
-            destinations.push_back(pointer);
-            if (offsets.size() == kTopK) flush_reads();
-        }
-        flush_reads();
-        return result;
-    }
-
     Batch resolve_batch_impl(
         uint32_t layer, const std::array<uint32_t, kTopK>& experts,
         const std::array<bool, kTopK>& needed,
         const std::array<void*, kTopK>& direct_destinations,
         ExpertFile::AsyncBatch* async,
-        std::array<bool, kTopK>* disk_pending,
-        ExpertFile::SplitBatch* split = nullptr) {
+        std::array<bool, kTopK>* disk_pending) {
         Batch result{};
         std::vector<bool> reserved(slots_);
         std::vector<uint64_t> offsets;
@@ -1159,17 +980,13 @@ public:
             uint32_t victim = UINT32_MAX;
             for (uint32_t slot = 0; slot < slots_; ++slot) {
                 if (reserved[slot]) continue;
-                bool replace = victim == UINT32_MAX || entries_[slot].key < 0;
-                if (!replace && entries_[victim].key >= 0) {
-                    replace = lru_ ?
-                        entries_[slot].age < entries_[victim].age :
-                        (frequency_[entries_[slot].key] <
-                             frequency_[entries_[victim].key] ||
-                         (frequency_[entries_[slot].key] ==
-                              frequency_[entries_[victim].key] &&
-                          entries_[slot].age < entries_[victim].age));
-                }
-                if (replace) {
+                if (victim == UINT32_MAX || entries_[slot].key < 0 ||
+                    (entries_[victim].key >= 0 &&
+                     (frequency_[entries_[slot].key] <
+                          frequency_[entries_[victim].key] ||
+                      (frequency_[entries_[slot].key] ==
+                           frequency_[entries_[victim].key] &&
+                       entries_[slot].age < entries_[victim].age)))) {
                     victim = slot;
                     if (entries_[slot].key < 0) break;
                 }
@@ -1196,9 +1013,7 @@ public:
             destinations.push_back(direct_destinations[rank]);
             read_ranks.push_back(rank);
         }
-        if (split) {
-            file_.begin_split(offsets, destinations, read_ranks, *split);
-        } else if (async) {
+        if (async) {
             file_.begin_batch(offsets, destinations, read_ranks, *async);
             if (disk_pending)
                 for (uint32_t rank : read_ranks) (*disk_pending)[rank] = true;
@@ -1234,7 +1049,6 @@ private:
     uint64_t clock_ = 0, hits_ = 0, misses_ = 0, disk_bytes_ = 0;
     uint64_t admission_bypasses_ = 0;
     bool tiny_lfu_ = false;
-    bool lru_ = false;
 };
 
 class DeviceExpertCache {
@@ -1243,39 +1057,11 @@ public:
         : runtime_(runtime), slots_(slots) {
         if (slots_ < kTopK)
             throw std::runtime_error("Qwen device expert cache is too small");
-        capacities_.assign(kLayers, slots_);
-        if (const char* profile = std::getenv("QWEN_DEVICE_SLOT_PROFILE")) {
-            profiled_ = true;
-            std::string text(profile);
-            size_t begin = 0;
-            uint64_t sum = 0;
-            for (uint32_t layer = 0; layer < kLayers; ++layer) {
-                const size_t end = text.find(',', begin);
-                const std::string item = text.substr(begin, end - begin);
-                if (item.empty())
-                    throw std::runtime_error("Empty Qwen device profile entry");
-                const uint32_t value = static_cast<uint32_t>(std::stoul(item));
-                if (value < kTopK || value > kMaximumDeviceSlots)
-                    throw std::runtime_error("Qwen device profile entry is outside the model cache bounds");
-                capacities_[layer] = value;
-                sum += value;
-                if (layer + 1u < kLayers) {
-                    if (end == std::string::npos)
-                        throw std::runtime_error("Short Qwen device profile");
-                    begin = end + 1u;
-                } else if (end != std::string::npos) {
-                    throw std::runtime_error("Long Qwen device profile");
-                }
-            }
-            if (sum != uint64_t(slots_) * kLayers)
-                throw std::runtime_error("Qwen device profile changes the VRAM slot budget");
-        }
         layers_.resize(kLayers);
-        for (uint32_t index = 0; index < kLayers; ++index) {
-            Layer& layer = layers_[index];
+        for (Layer& layer : layers_) {
             layer.arena = create_device_buffer(
-                runtime, uint64_t(capacities_[index]) * kExpertRecordBytes);
-            layer.entries.resize(capacities_[index]);
+                runtime, uint64_t(slots_) * kExpertRecordBytes);
+            layer.entries.resize(slots_);
             device_bytes_ += layer.arena.allocation_size;
         }
     }
@@ -1288,25 +1074,16 @@ public:
         std::array<uint32_t, kTopK> slots{};
         std::array<bool, kTopK> misses{};
     };
-    struct Batch2 {
-        std::array<std::array<uint32_t, kTopK>, 2> slots{};
-        std::array<uint32_t, 2 * kTopK> unique_experts{};
-        std::array<uint32_t, 2 * kTopK> unique_slots{};
-        std::array<bool, 2 * kTopK> unique_misses{};
-        uint32_t unique_count = 0;
-        uint32_t reused_occurrences = 0;
-    };
 
     Selection resolve(uint32_t layer_index,
                       const std::array<uint32_t, kTopK>& experts) {
         Layer& layer = layers_.at(layer_index);
-        const uint32_t capacity = capacities_.at(layer_index);
         Selection result{};
-        std::vector<bool> reserved(capacity);
+        std::vector<bool> reserved(slots_);
         for (uint32_t rank = 0; rank < kTopK; ++rank) {
             ++layer.frequency[experts[rank]];
             result.slots[rank] = UINT32_MAX;
-            for (uint32_t slot = 0; slot < capacity; ++slot) {
+            for (uint32_t slot = 0; slot < slots_; ++slot) {
                 if (layer.entries[slot].expert == int32_t(experts[rank])) {
                     result.slots[rank] = slot;
                     reserved[slot] = true;
@@ -1320,7 +1097,7 @@ public:
             if (result.slots[rank] != UINT32_MAX) continue;
             ++misses_;
             uint32_t victim = UINT32_MAX;
-            for (uint32_t slot = 0; slot < capacity; ++slot) {
+            for (uint32_t slot = 0; slot < slots_; ++slot) {
                 if (reserved[slot]) continue;
                 if (victim == UINT32_MAX || layer.entries[slot].expert < 0 ||
                     (layer.entries[victim].expert >= 0 &&
@@ -1344,76 +1121,6 @@ public:
         return result;
     }
 
-    Batch2 resolve_two(
-        uint32_t layer_index,
-        const std::array<std::array<uint32_t, kTopK>, 2>& experts) {
-        Layer& layer = layers_.at(layer_index);
-        const uint32_t capacity = capacities_.at(layer_index);
-        Batch2 result{};
-        if (capacity < 2 * kTopK)
-            throw std::runtime_error("Qwen verify2 requires at least 16 slots/layer");
-        std::array<uint32_t, 2 * kTopK> occurrence_unique{};
-        for (uint32_t row = 0; row < 2; ++row) {
-            for (uint32_t rank = 0; rank < kTopK; ++rank) {
-                const uint32_t expert = experts[row][rank];
-                ++layer.frequency[expert];
-                uint32_t unique = 0;
-                for (; unique < result.unique_count; ++unique)
-                    if (result.unique_experts[unique] == expert) break;
-                if (unique == result.unique_count) {
-                    result.unique_experts[result.unique_count++] = expert;
-                } else {
-                    ++result.reused_occurrences;
-                }
-                occurrence_unique[row * kTopK + rank] = unique;
-            }
-        }
-        std::vector<bool> reserved(capacity);
-        for (uint32_t unique = 0; unique < result.unique_count; ++unique) {
-            const uint32_t expert = result.unique_experts[unique];
-            result.unique_slots[unique] = UINT32_MAX;
-            for (uint32_t slot = 0; slot < capacity; ++slot) {
-                if (layer.entries[slot].expert != int32_t(expert)) continue;
-                result.unique_slots[unique] = slot;
-                reserved[slot] = true;
-                layer.entries[slot].age = ++clock_;
-                ++hits_;
-                break;
-            }
-        }
-        for (uint32_t unique = 0; unique < result.unique_count; ++unique) {
-            if (result.unique_slots[unique] != UINT32_MAX) continue;
-            ++misses_;
-            uint32_t victim = UINT32_MAX;
-            for (uint32_t slot = 0; slot < capacity; ++slot) {
-                if (reserved[slot]) continue;
-                if (victim == UINT32_MAX || layer.entries[slot].expert < 0 ||
-                    (layer.entries[victim].expert >= 0 &&
-                     (layer.frequency[layer.entries[slot].expert] <
-                          layer.frequency[layer.entries[victim].expert] ||
-                      (layer.frequency[layer.entries[slot].expert] ==
-                           layer.frequency[layer.entries[victim].expert] &&
-                       layer.entries[slot].age < layer.entries[victim].age)))) {
-                    victim = slot;
-                    if (layer.entries[slot].expert < 0) break;
-                }
-            }
-            if (victim == UINT32_MAX)
-                throw std::runtime_error("No Qwen verify2 device victim");
-            layer.entries[victim].expert =
-                int32_t(result.unique_experts[unique]);
-            layer.entries[victim].age = ++clock_;
-            reserved[victim] = true;
-            result.unique_slots[unique] = victim;
-            result.unique_misses[unique] = true;
-        }
-        for (uint32_t row = 0; row < 2; ++row)
-            for (uint32_t rank = 0; rank < kTopK; ++rank)
-                result.slots[row][rank] =
-                    result.unique_slots[occurrence_unique[row * kTopK + rank]];
-        return result;
-    }
-
     DescriptorRange record(uint32_t layer, uint32_t slot) const {
         return arena_range(layers_.at(layer).arena,
                            uint64_t(slot) * kExpertRecordBytes,
@@ -1421,18 +1128,6 @@ public:
     }
     Buffer& arena(uint32_t layer) { return layers_.at(layer).arena; }
     uint32_t slots() const { return slots_; }
-    uint32_t slots(uint32_t layer) const { return capacities_.at(layer); }
-    uint32_t total_slots() const {
-        return static_cast<uint32_t>(std::accumulate(
-            capacities_.begin(), capacities_.end(), uint64_t(0)));
-    }
-    bool profiled() const { return profiled_; }
-    uint32_t minimum_slots() const {
-        return *std::min_element(capacities_.begin(), capacities_.end());
-    }
-    uint32_t maximum_slots() const {
-        return *std::max_element(capacities_.begin(), capacities_.end());
-    }
     uint64_t hits() const { return hits_; }
     uint64_t misses() const { return misses_; }
     uint64_t device_bytes() const { return device_bytes_; }
@@ -1447,8 +1142,6 @@ private:
     };
     const Runtime& runtime_;
     uint32_t slots_;
-    std::vector<uint32_t> capacities_;
-    bool profiled_ = false;
     std::vector<Layer> layers_;
     uint64_t clock_ = 0, hits_ = 0, misses_ = 0, device_bytes_ = 0;
 };
@@ -1458,19 +1151,18 @@ struct Pipelines {
     VkPipeline swiglu{}, router{}, expert_gate{}, expert_down{}, reduce{};
     VkPipeline expert_gate_batch{}, expert_down_batch{};
     VkPipeline qk{}, store_value{}, attention{}, head_gate{};
-    VkPipeline conv{}, delta{}, argmax{}, mtp_fuse{};
+#ifdef OVLLM_LONG_CONTEXT_FORK
+    VkPipeline attention_reduce{};
+#endif
+    VkPipeline conv{}, delta{}, argmax{};
+    VkPipeline group_rms{}, hc_act{}, hc_mix{}, hc_inject{};
+    VkPipeline ple_gate{}, ple_conv_add{}, repeat_hc{};
 };
 
 class Kernels {
 public:
     Kernels(const Runtime& runtime, const std::filesystem::path& directory)
-        : runtime_(runtime), resources_(create_compute_resources(runtime,
-#ifdef XTLLM_QWEN3_CODER_NEXT
-              2u * kLayers * kMaximumDeviceSlots + 2048u
-#else
-              8192u
-#endif
-          )),
+        : runtime_(runtime), resources_(create_compute_resources(runtime, 20000)),
           dummy_(create_device_buffer(runtime, 4096)) {
         const auto load = [&](const char* name) {
             return dsv4::create_dsv4_pipeline(
@@ -1483,38 +1175,36 @@ public:
         pipelines_.q4_residual = load("dsv4_q4g64t_gemv_residual");
         pipelines_.q8 = load("dsv4_q8_gemv");
         pipelines_.swiglu = load("step37_swiglu");
-#ifdef XTLLM_QWEN3_CODER_NEXT
-        pipelines_.router = load("qwen_next_router_top10");
-        pipelines_.expert_gate = load("qwen_next_expert_gate_up_q4");
-        pipelines_.expert_down = load("qwen_next_expert_down_q4");
+        pipelines_.router = load("qwen38_router_top10");
+        pipelines_.expert_gate = load("qwen38_expert_gate_up_q4");
+        pipelines_.expert_down = load("qwen38_expert_down_q4");
+        // The first-pass benchmark uses the finite per-rank path.  Keep
+        // aliases so the retained descriptor ABI remains intact without
+        // requiring a second, architecture-specific BDA kernel variant.
+        pipelines_.expert_gate_batch = pipelines_.expert_gate;
+        pipelines_.expert_down_batch = pipelines_.expert_down;
+        pipelines_.reduce = load("qwen38_reduce_shared_gate");
+#ifdef OVLLM_LONG_CONTEXT_FORK
+        pipelines_.qk = load("qwen35_long_qk_rope_cache");
+        pipelines_.store_value = load("qwen35_long_store_value");
+        pipelines_.attention = load("qwen38_long_attention_partial");
+        pipelines_.attention_reduce = load("qwen35_long_attention_reduce");
 #else
-        pipelines_.router = load("qwen35_router_top8");
-        pipelines_.expert_gate = load("qwen35_expert_gate_up_q4");
-        pipelines_.expert_down = load("qwen35_expert_down_q4");
-#endif
-#if !defined(XTLLM_QWEN3_CODER_NEXT) && !defined(XTLLM_LONGCAT)
-        pipelines_.expert_gate_batch = load("qwen35_expert_gate_up_q4_bda_batch");
-        pipelines_.expert_down_batch = load("qwen35_expert_down_q4_bda_batch");
-#endif
-#if defined(XTLLM_QWEN3_CODER_NEXT) || defined(XTLLM_LONGCAT)
-        pipelines_.reduce = load("qwen_next_reduce_shared_gate");
-#else
-        pipelines_.reduce = load("qwen35_reduce_shared_gate");
-#endif
         pipelines_.qk = load("qwen35_qk_rope_cache");
         pipelines_.store_value = load("qwen35_store_value");
         pipelines_.attention = load("qwen35_attention");
+#endif
         pipelines_.head_gate = load("qwen35_head_gate");
         pipelines_.conv = load("qwen35_conv_update");
-#ifdef XTLLM_QWEN3_CODER_NEXT
-        pipelines_.delta = load("qwen_next_delta_recurrent_norm");
-#else
-        pipelines_.delta = load("qwen35_delta_recurrent_norm");
-#endif
+        pipelines_.delta = load("qwen38_delta_recurrent_norm");
         pipelines_.argmax = load("qwen35_greedy_argmax");
-#if !defined(XTLLM_QWEN3_CODER_NEXT) && !defined(XTLLM_LONGCAT)
-        pipelines_.mtp_fuse = load("step37_mtp_fuse");
-#endif
+        pipelines_.group_rms = load("qwen38_group_rmsnorm");
+        pipelines_.hc_act = load("qwen38_hc_down_act");
+        pipelines_.hc_mix = load("qwen38_hc_mix");
+        pipelines_.hc_inject = load("qwen38_hc_inject");
+        pipelines_.ple_gate = load("qwen38_ple_gate");
+        pipelines_.ple_conv_add = load("qwen38_ple_conv_add");
+        pipelines_.repeat_hc = load("qwen38_repeat_hc");
     }
 
     ~Kernels() {
@@ -1564,28 +1254,48 @@ private:
 
 struct Push { uint32_t a, b, c, d; };
 
+#ifdef OVLLM_LONG_CONTEXT_FORK
+static uint32_t requested_context_tokens() {
+    if (const char* exact = std::getenv("QWEN38_CONTEXT_TOKENS")) {
+        const uint64_t value = std::stoull(exact);
+        if (value < 128 || value > UINT32_MAX)
+            throw std::runtime_error("QWEN38_CONTEXT_TOKENS must be 128..2^32-1");
+        return static_cast<uint32_t>(value);
+    }
+    if (const char* text = std::getenv("QWEN38_CONTEXT_GIB")) {
+        const double gib = std::stod(text);
+        if (gib < 0.05 || gib > 16.0)
+            throw std::runtime_error("QWEN38_CONTEXT_GIB must be 0.05..16");
+        const uint64_t bytes = static_cast<uint64_t>(gib * double(1ull << 30));
+        const uint64_t per_token = uint64_t(kFullLayers) * 2u * kKvHeads *
+            kHeadDim * sizeof(uint16_t);
+        return static_cast<uint32_t>(bytes / per_token);
+    }
+    return kDefaultContext;
+}
+#endif
+
 class QwenEngine {
 public:
     QwenEngine(const Runtime& runtime, const SharedIndex& index,
                const std::filesystem::path& expert_path,
+               const std::filesystem::path& ple_path,
                const std::filesystem::path& shader_directory,
                uint64_t ram_budget, uint32_t device_slots)
         : runtime_(runtime), weights_(runtime, index), expert_file_(expert_path),
+          ple_lookup_(ple_path),
           host_cache_(expert_file_, ram_budget),
           device_cache_(runtime, device_slots),
           kernels_(runtime, shader_directory), compute_(runtime, runtime.queue),
           transfer_(runtime, runtime.secondary_queue) {
-#if defined(XTLLM_QWEN3_CODER_NEXT) || defined(XTLLM_LONGCAT)
-        // The retained Qwen3.5 BDA batch shaders encode that model's larger
-        // expert record.  Coder-Next uses the finite per-rank Vulkan path.
-        batch_experts_ = false;
-#else
-        batch_experts_ = std::getenv("QWEN_EXPERT_BATCH_BDA") != nullptr;
+#ifdef OVLLM_LONG_CONTEXT_FORK
+        max_context_ = requested_context_tokens();
+        attention_chunks_ = (max_context_ + kAttentionChunk - 1u) /
+            kAttentionChunk;
 #endif
+        batch_experts_ = false;
         progressive_experts_ =
-            std::getenv("QWEN_PROGRESSIVE_EXPERTS") != nullptr;
-        verify2_enabled_ = std::getenv("QWEN_VERIFY2_EXPERIMENT") != nullptr;
-        tensor_split_ = std::getenv("QWEN_TENSOR_SPLIT_EXPERIMENT") != nullptr;
+            std::getenv("QWEN38_PROGRESSIVE_EXPERTS") != nullptr;
         if (progressive_experts_)
             progressive_compute_ = std::make_unique<
                 dsv4::experiment::FiniteQueueRing<12>>(
@@ -1593,28 +1303,17 @@ public:
                     dsv4::finite_queue_ring_api());
         allocate_buffers();
         initialize_persistent_buffers();
+#ifndef OVLLM_LONG_CONTEXT_FORK
         make_rope();
+#endif
         build_sets();
         staging_.resize(kTopK);
         for (Buffer& buffer : staging_)
             buffer = dsv4::create_host_buffer_uninitialized(runtime_,
                                                              kExpertRecordBytes);
-        if (verify2_enabled_) {
-            verify_staging_.resize(2 * kTopK);
-            for (Buffer& buffer : verify_staging_)
-                buffer = dsv4::create_host_buffer_uninitialized(
-                    runtime_, kExpertRecordBytes);
-        }
-#if !defined(XTLLM_QWEN3_CODER_NEXT) && !defined(XTLLM_LONGCAT)
-        expert_trace_.open(1u, kLayers, kExperts, kTopK,
-                           static_cast<uint32_t>(kExpertRecordBytes),
-                           device_cache_.total_slots(),
-                           host_cache_.capacity());
-#endif
     }
 
     ~QwenEngine() {
-        for (Buffer& buffer : verify_staging_) destroy_buffer(runtime_, buffer);
         for (Buffer& buffer : staging_) destroy_buffer(runtime_, buffer);
         destroy_all();
     }
@@ -1623,11 +1322,14 @@ public:
                                    const std::vector<uint32_t>& prompt,
                                    uint32_t count) {
         if (prompt.empty()) throw std::runtime_error("Qwen prompt is empty");
+#ifdef OVLLM_LONG_CONTEXT_FORK
+        if (uint64_t(prompt.size()) + count > max_context_)
+            throw std::runtime_error("Qwen3.8 prompt plus generation exceeds configured context");
+#endif
         uint32_t position = 0;
         uint32_t next = 0;
-        for (; position < prompt.size(); ++position)
-            next = run_token(prompt[position], position);
-        if (std::getenv("QWEN_FILL_RAM_CACHE")) {
+        for (uint32_t token : prompt) next = run_token(token, position++);
+        if (std::getenv("QWEN38_FILL_RAM_CACHE")) {
             double fill_seconds = 0.0;
             const uint32_t filled =
                 host_cache_.fill_remaining_uniform(fill_seconds);
@@ -1636,8 +1338,18 @@ public:
                              double(1ull << 30)
                       << " GiB cache, " << fill_seconds << " s\n";
         }
+#ifdef OVLLM_LONG_CONTEXT_FORK
+        if (std::getenv("QWEN38_LONG_CONTEXT_STRESS")) {
+            if (max_context_ <= count + 2u)
+                throw std::runtime_error("Qwen3.8 context is too small for stress decode");
+            const uint32_t target = max_context_ - count;
+            expand_context_for_stress(prompt.size() - 1u, target);
+            position = target;
+            std::cout << "Qwen3.8 long-context stress positions: " << target
+                      << ".." << (max_context_ - 1u) << "\n";
+        }
+#endif
         reset_decode_metrics();
-        expert_trace_.set_decode(true);
         const auto started = std::chrono::steady_clock::now();
         std::vector<uint32_t> output;
         for (uint32_t i = 0; i < count; ++i) {
@@ -1659,7 +1371,9 @@ public:
         return host_cache_.admission_bypasses();
     }
     uint64_t disk_bytes() const { return host_cache_.disk_bytes(); }
+    uint64_t ple_disk_bytes() const { return ple_lookup_.bytes_read(); }
     uint64_t transfer_bytes() const { return transfer_bytes_; }
+    uint64_t ple_transfer_bytes() const { return ple_transfer_bytes_; }
     uint64_t host_copy_bytes() const { return host_copy_bytes_; }
     uint64_t cold_stalled_layers() const { return cold_stalled_layers_; }
     uint64_t progressive_layers() const { return progressive_layers_; }
@@ -1670,7 +1384,12 @@ public:
     uint64_t progressive_disk_ranks() const { return progressive_disk_ranks_; }
     uint64_t ram_bytes() const {
         return host_cache_.committed_bytes() +
-               uint64_t(staging_.size()) * kExpertRecordBytes;
+               uint64_t(staging_.size()) * kExpertRecordBytes
+               + ple_host_.allocation_size + 8192
+#ifdef OVLLM_LONG_CONTEXT_FORK
+               + kv_cache_.allocation_size
+#endif
+               ;
     }
     uint64_t vram_bytes() const {
         return weights_.device_bytes() + device_cache_.device_bytes() +
@@ -1678,287 +1397,11 @@ public:
     }
     uint32_t host_slots() const { return host_cache_.capacity(); }
     uint32_t device_slots() const { return device_cache_.slots(); }
-    uint32_t device_total_slots() const { return device_cache_.total_slots(); }
-    uint32_t device_minimum_slots() const { return device_cache_.minimum_slots(); }
-    uint32_t device_maximum_slots() const { return device_cache_.maximum_slots(); }
-    bool device_profiled() const { return device_cache_.profiled(); }
     double decode_seconds() const { return decode_seconds_; }
     double pre_seconds() const { return pre_seconds_; }
     double acquisition_seconds() const { return acquisition_seconds_; }
     double expert_seconds() const { return expert_seconds_; }
-    // Experimental MTP accessors.  They expose the already-retained main-model
-    // state without changing the ordinary generation path.
-    uint32_t process_experiment_token(uint32_t token, uint32_t position) {
-        return run_token(token, position);
-    }
-    DescriptorRange hidden_experiment_range() const { return whole(hidden_); }
-    TensorDevice embedding_experiment_tensor() const {
-        return weights_.tensor("embed");
-    }
-    TensorDevice lm_head_experiment_tensor() const {
-        return weights_.tensor("lm_head");
-    }
-    void reset_experiment_metrics() { reset_decode_metrics(); }
-    uint32_t project_experiment_hidden(DescriptorRange source) {
-        const uint64_t signal = compute_.submit([&](VkCommandBuffer command) {
-            VkBufferCopy copy{source.offset, 0, uint64_t(kDim) * sizeof(float)};
-            vkfn::CmdCopyBuffer(command, source.buffer, hidden_.handle, 1, &copy);
-            dsv4::transfer_barrier(command, hidden_);
-            Push push{1, kDim, float_bits(1e-6f), 0};
-            kernels_.dispatch(command, kernels_.p().rms, final_norm_set_, &push, 1);
-            compute_barrier(command);
-            push = {kDim, 128, kDim / 4, kDim / 4};
-            kernels_.dispatch(command, kernels_.p().quant, final_quant_set_, &push,
-                              kDim / 128);
-            compute_barrier(command);
-            push = {kVocabulary, kDim, kDim / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q8, lm_head_set_, &push,
-                              (kVocabulary + 7) / 8);
-            compute_barrier(command);
-            push = {kVocabulary, 256, 0, 0};
-            kernels_.dispatch(command, kernels_.p().argmax, argmax_set_, &push, 256);
-            compute_barrier(command);
-            push = {kVocabulary, 256, 1, 0};
-            kernels_.dispatch(command, kernels_.p().argmax, argmax_set_, &push, 1);
-            compute_barrier(command);
-        });
-        compute_.wait(signal);
-        invalidate_buffer(runtime_, token_);
-        return *static_cast<const uint32_t*>(token_.mapped);
-    }
-    uint32_t project_experiment_normalized(DescriptorRange source) {
-        const uint64_t signal = compute_.submit([&](VkCommandBuffer command) {
-            VkBufferCopy copy{source.offset, 0, uint64_t(kDim) * sizeof(float)};
-            vkfn::CmdCopyBuffer(command, source.buffer, normalized_.handle, 1,
-                                &copy);
-            dsv4::transfer_barrier(command, normalized_);
-            Push push{kDim, 128, kDim / 4, kDim / 4};
-            kernels_.dispatch(command, kernels_.p().quant, final_quant_set_, &push,
-                              kDim / 128);
-            compute_barrier(command);
-            push = {kVocabulary, kDim, kDim / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q8, lm_head_set_, &push,
-                              (kVocabulary + 7) / 8);
-            compute_barrier(command);
-            push = {kVocabulary, 256, 0, 0};
-            kernels_.dispatch(command, kernels_.p().argmax, argmax_set_, &push, 256);
-            compute_barrier(command);
-            push = {kVocabulary, 256, 1, 0};
-            kernels_.dispatch(command, kernels_.p().argmax, argmax_set_, &push, 1);
-            compute_barrier(command);
-        });
-        compute_.wait(signal);
-        invalidate_buffer(runtime_, token_);
-        return *static_cast<const uint32_t*>(token_.mapped);
-    }
-    std::array<uint32_t, 2> verify2_experiment(
-        const std::array<uint32_t, 2>& tokens, uint32_t position) {
-        if (!verify2_enabled_)
-            throw std::runtime_error("Qwen verify2 experiment is disabled");
-        if (position + 1 >= kMaximumContext)
-            throw std::runtime_error("Qwen verify2 context cap reached");
-        auto* token_words = static_cast<uint32_t*>(verify_tokens_.mapped);
-        token_words[0] = tokens[0];
-        token_words[1] = tokens[1];
-        flush_buffer(runtime_, verify_tokens_);
-        uint64_t signal = compute_.submit([&](VkCommandBuffer command) {
-            for (uint32_t row = 0; row < 2; ++row) {
-                Push push{kVocabulary, kDim, kDim / 4, 0};
-                kernels_.dispatch(command, kernels_.p().embedding,
-                                  verify_embedding_sets_[row], &push, kDim / 64);
-            }
-            compute_barrier(command);
-        });
-        compute_.wait(signal);
 
-        const auto to_transfer = [](VkCommandBuffer command) {
-            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                    VK_ACCESS_SHADER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT |
-                                    VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkfn::CmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr,
-                0, nullptr);
-        };
-        const auto to_compute = [](VkCommandBuffer command) {
-            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT |
-                                    VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                    VK_ACCESS_SHADER_WRITE_BIT;
-            vkfn::CmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0,
-                nullptr, 0, nullptr);
-        };
-
-        for (uint32_t layer = 0; layer < kLayers; ++layer) {
-            const auto pre_started = std::chrono::steady_clock::now();
-            signal = compute_.submit([&](VkCommandBuffer command) {
-                for (uint32_t row = 0; row < 2; ++row) {
-                    to_transfer(command);
-                    VkBufferCopy hidden_copy{0, 0, uint64_t(kDim) * 4};
-                    vkfn::CmdCopyBuffer(command, verify_hidden_[row].handle,
-                                        hidden_.handle, 1, &hidden_copy);
-                    to_compute(command);
-                    record_attention(command, layer, position + row);
-                    record_router(command, layer);
-                    to_transfer(command);
-                    vkfn::CmdCopyBuffer(command, hidden_.handle,
-                                        verify_hidden_[row].handle, 1,
-                                        &hidden_copy);
-                    const VkBufferCopy quant_copy{0, 0, quant_.size};
-                    vkfn::CmdCopyBuffer(command, quant_.handle,
-                                        verify_quant_[row].handle, 1,
-                                        &quant_copy);
-                    const VkBufferCopy route_copy{0,
-                        uint64_t(row) * 16u * sizeof(uint32_t),
-                        16u * sizeof(uint32_t)};
-                    vkfn::CmdCopyBuffer(command, routing_.handle,
-                                        verify_routing_.handle, 1, &route_copy);
-                    if (row == 0 && !full_attention(layer)) {
-                        const uint64_t linear = linear_index(layer);
-                        const VkBufferCopy conv_copy{
-                            linear * uint64_t(kLinearQkv) * kConvWidth * 4,
-                            linear * uint64_t(kLinearQkv) * kConvWidth * 4,
-                            uint64_t(kLinearQkv) * kConvWidth * 4};
-                        vkfn::CmdCopyBuffer(command, conv_state_.handle,
-                            verify_conv_snapshot_.handle, 1, &conv_copy);
-                        const VkBufferCopy recurrent_copy{
-                            linear * uint64_t(kLinearValueHeads) *
-                                kLinearHeadDim * kLinearHeadDim * 4,
-                            linear * uint64_t(kLinearValueHeads) *
-                                kLinearHeadDim * kLinearHeadDim * 4,
-                            uint64_t(kLinearValueHeads) * kLinearHeadDim *
-                                kLinearHeadDim * 4};
-                        vkfn::CmdCopyBuffer(command, recurrent_state_.handle,
-                            verify_recurrent_snapshot_.handle, 1,
-                            &recurrent_copy);
-                    }
-                    to_compute(command);
-                }
-            });
-            compute_.wait(signal);
-            pre_seconds_ += std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - pre_started).count();
-            invalidate_buffer(runtime_, verify_routing_);
-            std::array<std::array<uint32_t, kTopK>, 2> experts{};
-            const uint32_t* routes =
-                static_cast<const uint32_t*>(verify_routing_.mapped);
-            for (uint32_t row = 0; row < 2; ++row)
-                for (uint32_t rank = 0; rank < kTopK; ++rank) {
-                    experts[row][rank] = routes[row * 16u + rank];
-                    if (experts[row][rank] >= kExperts)
-                        throw std::runtime_error(
-                            "Qwen verify2 router returned invalid expert");
-                }
-
-            const auto acquire_started = std::chrono::steady_clock::now();
-            const DeviceExpertCache::Batch2 selection =
-                device_cache_.resolve_two(layer, experts);
-            verify_unique_experts_ += selection.unique_count;
-            verify_occurrences_ += 2 * kTopK;
-            verify_reused_occurrences_ += selection.reused_occurrences;
-            std::array<uint32_t, 2 * kTopK> missing_experts{};
-            std::array<uint32_t, 2 * kTopK> missing_unique{};
-            uint32_t missing_count = 0;
-            for (uint32_t unique = 0; unique < selection.unique_count; ++unique) {
-                if (!selection.unique_misses[unique]) continue;
-                missing_experts[missing_count] = selection.unique_experts[unique];
-                missing_unique[missing_count++] = unique;
-            }
-            const HostExpertCache::Many sources = host_cache_.resolve_many(
-                layer, missing_experts, missing_count);
-            if (sources.disk_reads) ++cold_stalled_layers_;
-            for (uint32_t index = 0; index < missing_count; ++index) {
-                std::memcpy(verify_staging_[index].mapped,
-                            sources.pointers[index], kExpertRecordBytes);
-                host_copy_bytes_ += kExpertRecordBytes;
-                dsv4::flush_buffer_range(runtime_, verify_staging_[index], 0,
-                                         kExpertRecordBytes);
-            }
-            uint64_t ready = 0;
-            if (missing_count) {
-                ready = transfer_.submit([&](VkCommandBuffer command) {
-                    for (uint32_t index = 0; index < missing_count; ++index) {
-                        const uint32_t unique = missing_unique[index];
-                        const VkBufferCopy copy{0,
-                            uint64_t(selection.unique_slots[unique]) *
-                                kExpertRecordBytes,
-                            kExpertRecordBytes};
-                        vkfn::CmdCopyBuffer(command,
-                            verify_staging_[index].handle,
-                            device_cache_.arena(layer).handle, 1, &copy);
-                    }
-                    dsv4::transfer_barrier(command, device_cache_.arena(layer));
-                });
-                transfer_bytes_ += uint64_t(missing_count) * kExpertRecordBytes;
-            }
-            acquisition_seconds_ += std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - acquire_started).count();
-
-            const auto expert_started = std::chrono::steady_clock::now();
-            signal = compute_.submit([&](VkCommandBuffer command) {
-                for (uint32_t row = 0; row < 2; ++row) {
-                    to_transfer(command);
-                    const VkBufferCopy hidden_copy{0, 0, uint64_t(kDim) * 4};
-                    vkfn::CmdCopyBuffer(command, verify_hidden_[row].handle,
-                                        hidden_.handle, 1, &hidden_copy);
-                    const VkBufferCopy quant_copy{0, 0, quant_.size};
-                    vkfn::CmdCopyBuffer(command, verify_quant_[row].handle,
-                                        quant_.handle, 1, &quant_copy);
-                    const VkBufferCopy route_copy{
-                        uint64_t(row) * 16u * sizeof(uint32_t), 0,
-                        16u * sizeof(uint32_t)};
-                    vkfn::CmdCopyBuffer(command, verify_routing_.handle,
-                                        routing_.handle, 1, &route_copy);
-                    to_compute(command);
-                    selected_slots_ = selection.slots[row];
-                    record_shared(command, layer);
-                    record_experts(command, layer);
-                    to_transfer(command);
-                    vkfn::CmdCopyBuffer(command, hidden_.handle,
-                                        verify_hidden_[row].handle, 1,
-                                        &hidden_copy);
-                    to_compute(command);
-                }
-            }, ready ? transfer_.semaphore() : VK_NULL_HANDLE, ready,
-               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-            compute_.wait(signal);
-            expert_seconds_ += std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - expert_started).count();
-        }
-        std::array<uint32_t, 2> result{};
-        result[0] = project_experiment_hidden(whole(verify_hidden_[0]));
-        result[1] = project_experiment_hidden(whole(verify_hidden_[1]));
-        return result;
-    }
-
-    void accept_verify2_experiment(bool second_row) {
-        if (!verify2_enabled_)
-            throw std::runtime_error("Qwen verify2 experiment is disabled");
-        if (second_row) return;
-        const uint64_t signal = compute_.submit([&](VkCommandBuffer command) {
-            const VkBufferCopy hidden_copy{0, 0, uint64_t(kDim) * 4};
-            vkfn::CmdCopyBuffer(command, verify_hidden_[0].handle,
-                                hidden_.handle, 1, &hidden_copy);
-            const VkBufferCopy conv_copy{0, 0, conv_state_.size};
-            vkfn::CmdCopyBuffer(command, verify_conv_snapshot_.handle,
-                                conv_state_.handle, 1, &conv_copy);
-            const VkBufferCopy recurrent_copy{0, 0, recurrent_state_.size};
-            vkfn::CmdCopyBuffer(command, verify_recurrent_snapshot_.handle,
-                                recurrent_state_.handle, 1, &recurrent_copy);
-            dsv4::transfer_barrier(command, hidden_);
-            dsv4::transfer_barrier(command, conv_state_);
-            dsv4::transfer_barrier(command, recurrent_state_);
-        });
-        compute_.wait(signal);
-    }
-    uint64_t verify_unique_experts() const { return verify_unique_experts_; }
-    uint64_t verify_occurrences() const { return verify_occurrences_; }
-    uint64_t verify_reused_occurrences() const {
-        return verify_reused_occurrences_;
-    }
 private:
     static bool full_attention(uint32_t layer) { return layer % 4u == 3u; }
     static uint32_t full_index(uint32_t layer) { return layer / 4u; }
@@ -1977,14 +1420,21 @@ private:
         routing_ = create_buffer(runtime_, 32u * sizeof(uint32_t));
         hidden_ = device(uint64_t(kDim) * 4);
         normalized_ = device(uint64_t(kDim) * 4);
-        qgate_ = device(uint64_t(kFullQProj) * 4);
+        hyper_ = device(uint64_t(kHcDim) * 4);
+        hc_normed_ = device(uint64_t(kHcDim) * 4);
+        hc_mix_weights_ = device(uint64_t(kHcDim) * 4);
+        hc_low_ = device(uint64_t(kHcLowrank) * 4);
+        hc_low_quant_ = device(128ull * 4);
+        hc_injection_ = device(uint64_t(kHcCount) * 4);
+        block_output_ = device(uint64_t(kDim) * 4);
+        qgate_ = device(12288ull * 4);
         key_ = device(512ull * 4);
         value_ = device(512ull * 4);
         context_ = device(kLinearValue * 4ull);
         mixed_qkv_ = device(kLinearQkv * 4ull);
         convolved_qkv_ = device(kLinearQkv * 4ull);
         z_ = device(kLinearValue * 4ull);
-        ab_ = device(uint64_t(kLinearAb) * 4);
+        ab_ = device(96ull * 4);
         quant_ = device(4224ull * 4);
         shared_gate_values_ = device(kMoeDim * 4ull);
         shared_up_values_ = device(kMoeDim * 4ull);
@@ -1993,7 +1443,7 @@ private:
         shared_expert_gate_ = device(4);
         router_logits_ = device(kExperts * 4ull);
         expert_intermediate_ = device(uint64_t(kTopK) * kMoeDim * 4);
-        expert_quant_ = device(2112ull * 4);
+        expert_quant_ = device(1664ull * 4);
         expert_outputs_ = device(uint64_t(kTopK) * kDim * 4);
         logits_ = device(uint64_t(kVocabulary) * 4);
         argmax_workspace_ = device(512ull * 4);
@@ -2002,20 +1452,25 @@ private:
         recurrent_state_ = device(uint64_t(kLinearLayers) *
                                   kLinearValueHeads * kLinearHeadDim *
                                   kLinearHeadDim * 4);
+        ple_host_ = dsv4::create_host_buffer_uninitialized(runtime_, kDim * 4ull);
+        ple_embedding_ = device(kDim * 4ull);
+        ple_key_ = device(kHcDim * 4ull);
+        ple_key_normed_ = device(kHcDim * 4ull);
+        ple_value_ = device(kDim * 4ull);
+        ple_gated_ = device(kHcDim * 4ull);
+        ple_gated_normed_ = device(kHcDim * 4ull);
+        ple_state_ = device(uint64_t(kHcDim) * kPleHistory * 4ull);
+#ifdef OVLLM_LONG_CONTEXT_FORK
+        const uint64_t kv_bytes = uint64_t(kFullLayers) * 2u * max_context_ *
+            kKvHeads * kHeadDim * sizeof(uint16_t);
+        kv_cache_ = dsv4::create_host_buffer_uninitialized(runtime_, kv_bytes);
+        attention_partial_ = device(uint64_t(attention_chunks_) *
+            kAttentionHeads * kAttentionPartialStride * sizeof(float));
+#else
         kv_cache_ = device(uint64_t(kFullLayers) * 2 * kMaximumContext *
                            kKvHeads * kHeadDim * 4);
         rope_ = device(uint64_t(kMaximumContext) * kRopeDim * 4);
-        if (verify2_enabled_) {
-            verify_tokens_ = create_buffer(runtime_, 2u * sizeof(uint32_t));
-            verify_routing_ = create_buffer(runtime_,
-                                             2u * 16u * sizeof(uint32_t));
-            for (Buffer& buffer : verify_hidden_)
-                buffer = device(uint64_t(kDim) * sizeof(float));
-            for (Buffer& buffer : verify_quant_)
-                buffer = device(4224ull * sizeof(uint32_t));
-            verify_conv_snapshot_ = device(conv_state_.size);
-            verify_recurrent_snapshot_ = device(recurrent_state_.size);
-        }
+#endif
     }
 
     void initialize_persistent_buffers() {
@@ -2023,7 +1478,11 @@ private:
         Buffer zeros = dsv4::create_host_buffer_uninitialized(runtime_, chunk_bytes);
         std::memset(zeros.mapped, 0, static_cast<size_t>(chunk_bytes));
         dsv4::flush_buffer_range(runtime_, zeros, 0, chunk_bytes);
-        for (Buffer* buffer : {&conv_state_, &recurrent_state_, &kv_cache_}) {
+        for (Buffer* buffer : {&conv_state_, &recurrent_state_, &ple_state_
+#ifndef OVLLM_LONG_CONTEXT_FORK
+                               , &kv_cache_
+#endif
+                               }) {
             for (uint64_t offset = 0; offset < buffer->size;
                  offset += chunk_bytes) {
                 const uint64_t bytes =
@@ -2042,6 +1501,7 @@ private:
     }
 
     void make_rope() {
+#ifndef OVLLM_LONG_CONTEXT_FORK
         std::vector<float> table(uint64_t(kMaximumContext) * kRopeDim);
         for (uint32_t position = 0; position < kMaximumContext; ++position) {
             for (uint32_t pair = 0; pair < kRopeDim / 2; ++pair) {
@@ -2067,14 +1527,29 @@ private:
         });
         compute_.wait(signal);
         destroy_buffer(runtime_, staging);
+#endif
     }
 
+    struct HcSets {
+        VkDescriptorSet norm{}, quant{}, down{}, inject{}, act{};
+        VkDescriptorSet low_quant{}, up{}, mix{}, apply{};
+    };
+
+    struct PleSets {
+        VkDescriptorSet quant{}, key{}, value{}, key_norm{}, query_norm{};
+        VkDescriptorSet gate{}, gated_norm{}, conv_add{};
+    };
+
     struct LayerSets {
-        VkDescriptorSet input_norm{}, hidden_quant{};
+        HcSets attn_hc{}, mlp_hc{};
+        VkDescriptorSet hidden_quant{};
         VkDescriptorSet qgate{}, key{}, value{}, qk{}, store_value{};
         VkDescriptorSet attention{}, head_gate{}, context_quant{}, attention_out{};
+#ifdef OVLLM_LONG_CONTEXT_FORK
+        VkDescriptorSet attention_reduce{};
+#endif
         VkDescriptorSet gdn_qkv{}, gdn_z{}, ab{}, conv{}, delta{}, gdn_out{};
-        VkDescriptorSet post_norm{}, router_gemv{}, router{};
+        VkDescriptorSet router_gemv{}, router{};
         VkDescriptorSet shared_gate{}, shared_up{}, shared_swiglu{};
         VkDescriptorSet shared_quant{}, shared_down{}, shared_expert_gate{};
         std::vector<VkDescriptorSet> expert_gate, expert_down;
@@ -2097,27 +1572,41 @@ private:
                              residual.buffer ? residual : kernels_.dummy()});
     }
 
+    HcSets build_hc_sets(const std::string& prefix, bool with_injection) {
+        HcSets sets{};
+        const TensorDevice norm = tensor(prefix + "norm", TensorFormat::f32, kHcDim);
+        const TensorDevice down = tensor(prefix + "down", TensorFormat::q4g64t,
+                                         kHcLowrank, kHcDim);
+        const TensorDevice up = tensor(prefix + "up", TensorFormat::q4g64t,
+                                       kHcDim, kHcLowrank);
+        sets.norm = kernels_.set({whole(hyper_), norm.data, whole(hc_normed_)});
+        sets.quant = kernels_.set({whole(hc_normed_), whole(quant_)});
+        sets.down = q4_set(whole(quant_), down, whole(hc_low_));
+        sets.act = kernels_.set({whole(hc_low_)});
+        sets.low_quant = kernels_.set({whole(hc_low_), whole(hc_low_quant_)});
+        sets.up = q4_set(whole(hc_low_quant_), up, whole(hc_mix_weights_));
+        sets.mix = kernels_.set({whole(hc_normed_), whole(hc_mix_weights_),
+                                 whole(hidden_)});
+        if (with_injection) {
+            const TensorDevice injection = tensor(prefix + "inject",
+                TensorFormat::q4g64t, kHcCount, kHcDim);
+            sets.inject = q4_set(whole(quant_), injection, whole(hc_injection_));
+            sets.apply = kernels_.set({whole(block_output_), whole(hc_injection_),
+                                       whole(hyper_)});
+        }
+        return sets;
+    }
+
     void build_sets() {
         const TensorDevice embedding =
             tensor("embed", TensorFormat::q8_row, kVocabulary, kDim);
-        const TensorDevice final_norm =
-            tensor("final_norm", TensorFormat::f32, kDim);
         const TensorDevice lm_head =
             tensor("lm_head", TensorFormat::q8_row, kVocabulary, kDim);
         embedding_set_ = kernels_.set(
             {embedding.data, embedding.auxiliary, whole(token_), whole(hidden_)});
-        if (verify2_enabled_) {
-            for (uint32_t row = 0; row < 2; ++row) {
-                verify_embedding_sets_[row] = kernels_.set({
-                    embedding.data, embedding.auxiliary,
-                    arena_range(verify_tokens_, uint64_t(row) * sizeof(uint32_t),
-                                sizeof(uint32_t)),
-                    whole(verify_hidden_[row])});
-            }
-        }
-        final_norm_set_ = kernels_.set(
-            {whole(hidden_), final_norm.data, whole(normalized_)});
-        final_quant_set_ = kernels_.set({whole(normalized_), whole(quant_)});
+        repeat_set_ = kernels_.set({whole(hidden_), whole(hyper_)});
+        final_hc_ = build_hc_sets("final_hc_", false);
+        final_quant_set_ = kernels_.set({whole(hidden_), whole(quant_)});
         lm_head_set_ = kernels_.set(
             {whole(quant_), lm_head.data, lm_head.auxiliary, whole(logits_)});
         argmax_set_ = kernels_.set(
@@ -2136,7 +1625,7 @@ private:
                             expert_quant_.size - output_offset)});
         }
         reduce_set_ = kernels_.set({whole(expert_outputs_), whole(shared_output_),
-                                    whole(shared_expert_gate_), whole(hidden_)});
+                                    whole(shared_expert_gate_), whole(block_output_)});
         const DescriptorRange expert_addresses = arena_range(
             routing_, 16u * sizeof(uint32_t), kTopK * sizeof(uint64_t));
         expert_gate_batch_set_ = kernels_.set(
@@ -2150,17 +1639,13 @@ private:
         for (uint32_t layer = 0; layer < kLayers; ++layer) {
             LayerSets& sets = layers_[layer];
             const std::string prefix = "layers." + std::to_string(layer) + ".";
-            const TensorDevice input_norm =
-                tensor(prefix + "input_norm", TensorFormat::f32, kDim);
-            const TensorDevice post_norm =
-                tensor(prefix + "post_norm", TensorFormat::f32, kDim);
-            sets.input_norm = kernels_.set(
-                {whole(hidden_), input_norm.data, whole(normalized_)});
-            sets.hidden_quant = kernels_.set({whole(normalized_), whole(quant_)});
+            sets.attn_hc = build_hc_sets(prefix + "attn_hc_", true);
+            sets.mlp_hc = build_hc_sets(prefix + "mlp_hc_", true);
+            sets.hidden_quant = kernels_.set({whole(hidden_), whole(quant_)});
 
             if (full_attention(layer)) {
                 const TensorDevice query = tensor(prefix + "q_proj",
-                    TensorFormat::q4g64t, kFullQProj, kDim);
+                    TensorFormat::q4g64t, 12288, kDim);
                 const TensorDevice key = tensor(prefix + "k_proj",
                     TensorFormat::q4g64t, 512, kDim);
                 const TensorDevice value = tensor(prefix + "v_proj",
@@ -2174,28 +1659,43 @@ private:
                 sets.qgate = q4_set(whole(quant_), query, whole(qgate_));
                 sets.key = q4_set(whole(quant_), key, whole(key_));
                 sets.value = q4_set(whole(quant_), value, whole(value_));
+#ifdef OVLLM_LONG_CONTEXT_FORK
+                const uint64_t layer_cache_bytes = uint64_t(max_context_) * 2u *
+                    kKvHeads * kHeadDim * sizeof(uint16_t);
+                const DescriptorRange layer_cache = arena_range(kv_cache_,
+                    uint64_t(full_index(layer)) * layer_cache_bytes,
+                    layer_cache_bytes);
+                sets.qk = kernels_.set({whole(qgate_), whole(key_), qnorm.data,
+                                        knorm.data, layer_cache});
+                sets.store_value = kernels_.set({whole(value_), layer_cache});
+                sets.attention = kernels_.set(
+                    {whole(qgate_), layer_cache, whole(attention_partial_)});
+                sets.attention_reduce = kernels_.set(
+                    {whole(attention_partial_), whole(context_)});
+#else
                 sets.qk = kernels_.set({whole(qgate_), whole(key_), qnorm.data,
                                         knorm.data, whole(kv_cache_), whole(rope_)});
                 sets.store_value = kernels_.set({whole(value_), whole(kv_cache_)});
                 sets.attention = kernels_.set(
                     {whole(qgate_), whole(kv_cache_), whole(context_)});
+#endif
                 sets.head_gate = kernels_.set({whole(context_), whole(qgate_)});
                 sets.context_quant = kernels_.set({whole(context_), whole(quant_)});
-                sets.attention_out = q4_set(whole(quant_), output, whole(hidden_),
-                                            whole(hidden_));
+                sets.attention_out = q4_set(whole(quant_), output,
+                                            whole(block_output_));
             } else {
                 const TensorDevice qkv = tensor(prefix + "gdn_qkv",
                     TensorFormat::q4g64t, kLinearQkv, kDim);
                 const TensorDevice z = tensor(prefix + "gdn_z",
                     TensorFormat::q4g64t, kLinearValue, kDim);
                 const TensorDevice ab = tensor(prefix + "ab_proj",
-                    TensorFormat::q4g64t, kLinearAb, kDim);
+                    TensorFormat::q4g64t, 96, kDim);
                 const TensorDevice output = tensor(prefix + "gdn_out",
                     TensorFormat::q4g64t, kDim, kLinearValue);
                 const TensorDevice conv = tensor(prefix + "conv",
                     TensorFormat::f32, kLinearQkv, kConvWidth);
                 const TensorDevice params = tensor(prefix + "delta_params",
-                    TensorFormat::f32, kDeltaParams);
+                    TensorFormat::f32, 224);
                 const uint64_t linear = linear_index(layer);
                 const DescriptorRange conv_state = arena_range(
                     conv_state_, linear * uint64_t(kLinearQkv) * kConvWidth * 4,
@@ -2214,12 +1714,10 @@ private:
                                            whole(ab_), recurrent_state,
                                            params.data, whole(context_)});
                 sets.context_quant = kernels_.set({whole(context_), whole(quant_)});
-                sets.gdn_out = q4_set(whole(quant_), output, whole(hidden_),
-                                      whole(hidden_));
+                sets.gdn_out = q4_set(whole(quant_), output,
+                                      whole(block_output_));
             }
 
-            sets.post_norm = kernels_.set(
-                {whole(hidden_), post_norm.data, whole(normalized_)});
             const TensorDevice router = tensor(prefix + "router",
                 TensorFormat::q8_row, kExperts, kDim);
             sets.router_gemv = kernels_.set({whole(quant_), router.data,
@@ -2250,9 +1748,9 @@ private:
             sets.shared_expert_gate = q4_set(whole(quant_), expert_gate,
                                              whole(shared_expert_gate_));
 
-            sets.expert_gate.resize(device_cache_.slots(layer));
-            sets.expert_down.resize(device_cache_.slots(layer));
-            for (uint32_t slot = 0; slot < device_cache_.slots(layer); ++slot) {
+            sets.expert_gate.resize(device_cache_.slots());
+            sets.expert_down.resize(device_cache_.slots());
+            for (uint32_t slot = 0; slot < device_cache_.slots(); ++slot) {
                 const DescriptorRange record = device_cache_.record(layer, slot);
                 sets.expert_gate[slot] = kernels_.set(
                     {whole(quant_), record, whole(routing_),
@@ -2262,30 +1760,107 @@ private:
                      whole(expert_outputs_)});
             }
         }
+
+        const std::string ple = "layers.1.";
+        const TensorDevice ple_key = tensor(ple + "ple_key", TensorFormat::q4g64t,
+                                            kHcDim, kDim);
+        const TensorDevice ple_value = tensor(ple + "ple_value", TensorFormat::q4g64t,
+                                              kDim, kDim);
+        const TensorDevice ple_norm_key = tensor(ple + "ple_norm_key", TensorFormat::f32,
+                                                 kHcDim);
+        const TensorDevice ple_norm_query = tensor(ple + "ple_norm_query", TensorFormat::f32,
+                                                   kHcDim);
+        const TensorDevice ple_norm_conv = tensor(ple + "ple_norm_conv", TensorFormat::f32,
+                                                  kHcDim);
+        const TensorDevice ple_conv = tensor(ple + "ple_conv", TensorFormat::f32,
+                                             kHcDim, 4);
+        ple_sets_.quant = kernels_.set({whole(ple_embedding_), whole(quant_)});
+        ple_sets_.key = q4_set(whole(quant_), ple_key, whole(ple_key_));
+        ple_sets_.value = q4_set(whole(quant_), ple_value, whole(ple_value_));
+        ple_sets_.key_norm = kernels_.set({whole(ple_key_), ple_norm_key.data,
+                                           whole(ple_key_normed_)});
+        ple_sets_.query_norm = kernels_.set({whole(hyper_), ple_norm_query.data,
+                                             whole(hc_normed_)});
+        ple_sets_.gate = kernels_.set({whole(ple_key_normed_), whole(hc_normed_),
+                                       whole(ple_value_), whole(ple_gated_)});
+        ple_sets_.gated_norm = kernels_.set({whole(ple_gated_), ple_norm_conv.data,
+                                             whole(ple_gated_normed_)});
+        ple_sets_.conv_add = kernels_.set({whole(ple_gated_), whole(ple_gated_normed_),
+                                           ple_conv.data, whole(ple_state_), whole(hyper_)});
     }
+
+#ifdef OVLLM_LONG_CONTEXT_FORK
+    void expand_context_for_stress(uint32_t source_position,
+                                   uint32_t target_position) {
+        if (target_position <= source_position + 1u) return;
+        invalidate_buffer(runtime_, kv_cache_);
+        const uint64_t token_bytes = uint64_t(kKvHeads) * kHeadDim *
+            sizeof(uint16_t);
+        const uint64_t plane_bytes = uint64_t(max_context_) * token_bytes;
+        const uint64_t layer_bytes = 2u * plane_bytes;
+        auto* base = static_cast<uint8_t*>(kv_cache_.mapped);
+        for (uint32_t layer = 0; layer < kFullLayers; ++layer) {
+            for (uint32_t plane = 0; plane < 2u; ++plane) {
+                uint8_t* values = base + uint64_t(layer) * layer_bytes +
+                    uint64_t(plane) * plane_bytes;
+                const uint32_t begin = source_position + 1u;
+                std::memcpy(values + uint64_t(begin) * token_bytes,
+                            values + uint64_t(source_position) * token_bytes,
+                            token_bytes);
+                uint32_t filled = 1u;
+                while (begin + filled < target_position) {
+                    const uint32_t count = std::min<uint32_t>(
+                        filled, target_position - begin - filled);
+                    std::memcpy(values + uint64_t(begin + filled) * token_bytes,
+                                values + uint64_t(begin) * token_bytes,
+                                uint64_t(count) * token_bytes);
+                    filled += count;
+                }
+            }
+        }
+        dsv4::flush_buffer_range(runtime_, kv_cache_, 0, kv_cache_.size);
+    }
+#endif
 
     void reset_decode_metrics() {
         host_cache_.reset_metrics();
         device_cache_.reset_metrics();
+        ple_lookup_.reset_metrics();
         transfer_bytes_ = 0;
+        ple_transfer_bytes_ = 0;
         host_copy_bytes_ = 0;
         cold_stalled_layers_ = 0;
         progressive_layers_ = progressive_resident_ranks_ = 0;
         progressive_ram_ranks_ = progressive_disk_ranks_ = 0;
-        verify_unique_experts_ = verify_occurrences_ = 0;
-        verify_reused_occurrences_ = 0;
         pre_seconds_ = acquisition_seconds_ = expert_seconds_ = 0;
     }
 
     uint32_t run_token(uint32_t token, uint32_t position) {
+#ifdef OVLLM_LONG_CONTEXT_FORK
+        if (position >= max_context_)
+#else
         if (position >= kMaximumContext)
+#endif
             throw std::runtime_error("Qwen runtime context cap reached");
         *static_cast<uint32_t*>(token_.mapped) = token;
         flush_buffer(runtime_, token_);
+        ple_lookup_.lookup(token, static_cast<float*>(ple_host_.mapped));
+        dsv4::flush_buffer_range(runtime_, ple_host_, 0, kDim * 4ull);
+        const uint64_t ple_ready = transfer_.submit([&](VkCommandBuffer command) {
+            VkBufferCopy copy{0, 0, kDim * 4ull};
+            vkfn::CmdCopyBuffer(command, ple_host_.handle,
+                                ple_embedding_.handle, 1, &copy);
+            dsv4::transfer_barrier(command, ple_embedding_);
+        });
+        ple_transfer_bytes_ += kDim * 4ull;
         uint64_t signal = compute_.submit([&](VkCommandBuffer command) {
             Push push{kVocabulary, kDim, kDim / 4, 0};
             kernels_.dispatch(command, kernels_.p().embedding, embedding_set_,
                               &push, (kDim + 63) / 64);
+            compute_barrier(command);
+            push = {kDim, kHcCount, 0, 0};
+            kernels_.dispatch(command, kernels_.p().repeat_hc, repeat_set_,
+                              &push, (kHcDim + 63) / 64);
             compute_barrier(command);
         });
         compute_.wait(signal);
@@ -2293,21 +1868,24 @@ private:
         for (uint32_t layer = 0; layer < kLayers; ++layer) {
             auto started = std::chrono::steady_clock::now();
             signal = compute_.submit([&](VkCommandBuffer command) {
+                if (layer == 1) record_ple(command);
+                record_hc_start(command, layers_[layer].attn_hc, true);
                 record_attention(command, layer, position);
+                record_hc_apply(command, layers_[layer].attn_hc);
+                record_hc_start(command, layers_[layer].mlp_hc, true);
                 record_router(command, layer);
-            });
+            }, layer == 1 ? transfer_.semaphore() : VK_NULL_HANDLE,
+               layer == 1 ? ple_ready : 0,
+               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
             compute_.wait(signal);
             pre_seconds_ += std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - started).count();
 
             invalidate_buffer(runtime_, routing_);
             std::array<uint32_t, kTopK> experts{};
-            std::array<float, kTopK> route_weights{};
             const uint32_t* routes = static_cast<const uint32_t*>(routing_.mapped);
             for (uint32_t rank = 0; rank < kTopK; ++rank) {
                 experts[rank] = routes[rank];
-                std::memcpy(&route_weights[rank], routes + kTopK + rank,
-                            sizeof(float));
                 if (experts[rank] >= kExperts)
                     throw std::runtime_error("Qwen router returned invalid expert");
             }
@@ -2326,131 +1904,6 @@ private:
             const bool has_missing = std::any_of(
                 selection.misses.begin(), selection.misses.end(),
                 [](bool missing) { return missing; });
-            if (tensor_split_ && progressive_experts_ && has_missing) {
-                HostExpertCache::SplitProgressiveBatch batch{};
-                host_cache_.begin_progressive_split(
-                    layer, experts, selection.misses, direct_destinations,
-                    batch);
-                if (batch.sources.disk_reads) ++cold_stalled_layers_;
-
-                for (uint32_t rank = 0; rank < kTopK; ++rank) {
-                    if (selection.misses[rank]) continue;
-                    progressive_compute_->submit([&](VkCommandBuffer command) {
-                        record_expert_rank(command, layer, rank);
-                    });
-                    ++progressive_resident_ranks_;
-                }
-
-                uint64_t last_ready = 0;
-                for (uint32_t rank = 0; rank < kTopK; ++rank) {
-                    if (!selection.misses[rank] ||
-                        batch.sources.direct[rank]) continue;
-                    std::memcpy(staging_[rank].mapped,
-                                batch.sources.pointers[rank],
-                                kExpertRecordBytes);
-                    host_copy_bytes_ += kExpertRecordBytes;
-                    dsv4::flush_buffer_range(runtime_, staging_[rank], 0,
-                                             kExpertRecordBytes);
-                    last_ready = transfer_.submit([&](VkCommandBuffer command) {
-                        const VkBufferCopy copy{0,
-                            uint64_t(selected_slots_[rank]) * kExpertRecordBytes,
-                            kExpertRecordBytes};
-                        vkfn::CmdCopyBuffer(command, staging_[rank].handle,
-                            device_cache_.arena(layer).handle, 1, &copy);
-                        dsv4::transfer_barrier(command,
-                                               device_cache_.arena(layer));
-                    });
-                    transfer_bytes_ += kExpertRecordBytes;
-                    progressive_compute_->submit(
-                        [&](VkCommandBuffer command) {
-                            record_expert_rank(command, layer, rank);
-                        }, transfer_.semaphore(), last_ready);
-                    ++progressive_ram_ranks_;
-                }
-
-                std::array<bool, kTopK> prefix_ready{}, suffix_ready{};
-                std::array<bool, kTopK> gate_submitted{}, down_submitted{};
-                const auto submit_gate = [&](uint32_t rank) {
-                    dsv4::flush_buffer_range(runtime_, staging_[rank], 0,
-                                             kDownScale);
-                    last_ready = transfer_.submit([&](VkCommandBuffer command) {
-                        const VkBufferCopy copy{0,
-                            uint64_t(selected_slots_[rank]) * kExpertRecordBytes,
-                            kDownScale};
-                        vkfn::CmdCopyBuffer(command, staging_[rank].handle,
-                            device_cache_.arena(layer).handle, 1, &copy);
-                        dsv4::transfer_barrier(command,
-                                               device_cache_.arena(layer));
-                    });
-                    progressive_compute_->submit(
-                        [&](VkCommandBuffer command) {
-                            record_expert_rank_gate(command, layer, rank);
-                        }, transfer_.semaphore(), last_ready);
-                    transfer_bytes_ += kDownScale;
-                    gate_submitted[rank] = true;
-                };
-                const auto submit_down = [&](uint32_t rank) {
-                    dsv4::flush_buffer_range(runtime_, staging_[rank],
-                        kDownScale, kExpertRecordBytes - kDownScale);
-                    last_ready = transfer_.submit([&](VkCommandBuffer command) {
-                        const VkBufferCopy copy{kDownScale,
-                            uint64_t(selected_slots_[rank]) * kExpertRecordBytes +
-                                kDownScale,
-                            kExpertRecordBytes - kDownScale};
-                        vkfn::CmdCopyBuffer(command, staging_[rank].handle,
-                            device_cache_.arena(layer).handle, 1, &copy);
-                        dsv4::transfer_barrier(command,
-                                               device_cache_.arena(layer));
-                    });
-                    progressive_compute_->submit(
-                        [&](VkCommandBuffer command) {
-                            record_expert_rank_down(command, layer, rank);
-                        }, transfer_.semaphore(), last_ready);
-                    transfer_bytes_ += kExpertRecordBytes - kDownScale;
-                    down_submitted[rank] = true;
-                    ++progressive_disk_ranks_;
-                };
-                while (batch.reads.remaining) {
-                    const auto [rank, part] =
-                        host_cache_.wait_next_split(batch);
-                    if (part == 0) prefix_ready[rank] = true;
-                    else suffix_ready[rank] = true;
-                    if (prefix_ready[rank] && !gate_submitted[rank])
-                        submit_gate(rank);
-                    if (suffix_ready[rank] && gate_submitted[rank] &&
-                        !down_submitted[rank])
-                        submit_down(rank);
-                }
-                for (uint32_t rank = 0; rank < kTopK; ++rank) {
-                    if (!selection.misses[rank] ||
-                        !batch.sources.direct[rank]) continue;
-                    if (!gate_submitted[rank]) submit_gate(rank);
-                    if (!down_submitted[rank]) submit_down(rank);
-                }
-                host_cache_.finish_progressive_split(batch);
-                acquisition_seconds_ += std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - started).count();
-                const uint64_t finished = progressive_compute_->submit(
-                    [&](VkCommandBuffer command) { record_expert_finish(command); });
-                if (last_ready) transfer_.wait(last_ready);
-                for (uint32_t rank = 0; rank < kTopK; ++rank) {
-                    if (!selection.misses[rank] ||
-                        !batch.sources.direct[rank] ||
-                        !batch.sources.pointers[rank]) continue;
-                    std::memcpy(
-                        const_cast<uint8_t*>(batch.sources.pointers[rank]),
-                        staging_[rank].mapped, kExpertRecordBytes);
-                    host_copy_bytes_ += kExpertRecordBytes;
-                }
-                progressive_compute_->wait(finished);
-                write_expert_trace(position, layer, experts, route_weights,
-                                   selection, batch.sources, started,
-                                   std::chrono::steady_clock::now());
-                ++progressive_layers_;
-                expert_seconds_ += std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - expert_started).count();
-                continue;
-            }
             if (progressive_experts_ && has_missing) {
                 HostExpertCache::ProgressiveBatch batch{};
                 host_cache_.begin_progressive(
@@ -2536,7 +1989,7 @@ private:
 
                 const uint64_t finished = progressive_compute_->submit(
                     [&](VkCommandBuffer command) {
-                        record_expert_finish(command);
+                        record_expert_finish(command, layer);
                     });
                 // Once the last H2D is complete, populate admitted RAM slots
                 // while the finite compute queue finishes late ranks/reduce.
@@ -2551,9 +2004,6 @@ private:
                     host_copy_bytes_ += kExpertRecordBytes;
                 }
                 progressive_compute_->wait(finished);
-                write_expert_trace(position, layer, experts, route_weights,
-                                   selection, batch.sources, started,
-                                   std::chrono::steady_clock::now());
                 ++progressive_layers_;
                 expert_seconds_ += std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - expert_started).count();
@@ -2610,18 +2060,13 @@ private:
                 }
             }
             compute_.wait(signal);
-            write_expert_trace(position, layer, experts, route_weights,
-                               selection, sources, started,
-                               std::chrono::steady_clock::now());
             expert_seconds_ += std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - expert_started).count();
         }
 
         signal = compute_.submit([&](VkCommandBuffer command) {
-            Push push{1, kDim, float_bits(1e-6f), 0};
-            kernels_.dispatch(command, kernels_.p().rms, final_norm_set_, &push, 1);
-            compute_barrier(command);
-            push = {kDim, 128, kDim / 4, kDim / 4};
+            record_hc_start(command, final_hc_, false);
+            Push push{kDim, 128, kDim / 4, kDim / 4};
             kernels_.dispatch(command, kernels_.p().quant, final_quant_set_, &push,
                               kDim / 128);
             compute_barrier(command);
@@ -2641,36 +2086,128 @@ private:
         return *static_cast<const uint32_t*>(token_.mapped);
     }
 
+    void record_hc_start(VkCommandBuffer command, HcSets& sets,
+                         bool with_injection) {
+        Push push{kHcCount, kDim, float_bits(1e-6f), 0};
+        kernels_.dispatch(command, kernels_.p().group_rms, sets.norm, &push,
+                          kHcCount);
+        compute_barrier(command);
+        push = {kHcDim, 128, kHcDim / 4, kHcDim / 4};
+        kernels_.dispatch(command, kernels_.p().quant, sets.quant, &push,
+                          (kHcDim + 127) / 128);
+        compute_barrier(command);
+        push = {kHcLowrank, kHcDim, kHcDim / 4, 0};
+        kernels_.dispatch(command, kernels_.p().q4, sets.down, &push,
+                          (kHcLowrank + 7) / 8);
+        if (with_injection) {
+            push = {kHcCount, kHcDim, kHcDim / 4, 0};
+            kernels_.dispatch(command, kernels_.p().q4, sets.inject, &push, 1);
+        }
+        compute_barrier(command);
+        push = {kHcLowrank, float_bits(float(kHcCount)), 0, 0};
+        kernels_.dispatch(command, kernels_.p().hc_act, sets.act, &push,
+                          (kHcLowrank + 63) / 64);
+        compute_barrier(command);
+        push = {kHcLowrank, 128, kHcLowrank / 4, kHcLowrank / 4};
+        kernels_.dispatch(command, kernels_.p().quant, sets.low_quant, &push,
+                          (kHcLowrank + 127) / 128);
+        compute_barrier(command);
+        push = {kHcDim, kHcLowrank, kHcLowrank / 4, 0};
+        kernels_.dispatch(command, kernels_.p().q4, sets.up, &push,
+                          kHcDim / 8);
+        compute_barrier(command);
+        push = {kDim, kHcCount, 0, 0};
+        kernels_.dispatch(command, kernels_.p().hc_mix, sets.mix, &push,
+                          (kDim + 63) / 64);
+        compute_barrier(command);
+    }
+
+    void record_hc_apply(VkCommandBuffer command, HcSets& sets) {
+        const Push push{kDim, kHcCount, float_bits(float(kHcCount)), 0};
+        kernels_.dispatch(command, kernels_.p().hc_inject, sets.apply, &push,
+                          (kHcDim + 63) / 64);
+        compute_barrier(command);
+    }
+
+    void record_ple(VkCommandBuffer command) {
+        Push push{kDim, 128, kDim / 4, kDim / 4};
+        kernels_.dispatch(command, kernels_.p().quant, ple_sets_.quant, &push,
+                          kDim / 128);
+        compute_barrier(command);
+        push = {kHcDim, kDim, kDim / 4, 0};
+        kernels_.dispatch(command, kernels_.p().q4, ple_sets_.key, &push,
+                          kHcDim / 8);
+        push = {kDim, kDim, kDim / 4, 0};
+        kernels_.dispatch(command, kernels_.p().q4, ple_sets_.value, &push,
+                          kDim / 8);
+        compute_barrier(command);
+        push = {kHcCount, kDim, float_bits(1e-6f), 0};
+        kernels_.dispatch(command, kernels_.p().group_rms, ple_sets_.key_norm,
+                          &push, kHcCount);
+        kernels_.dispatch(command, kernels_.p().group_rms, ple_sets_.query_norm,
+                          &push, kHcCount);
+        compute_barrier(command);
+        push = {kDim, kHcCount, 0, 0};
+        kernels_.dispatch(command, kernels_.p().ple_gate, ple_sets_.gate,
+                          &push, kHcCount);
+        compute_barrier(command);
+        push = {kHcCount, kDim, float_bits(1e-6f), 0};
+        kernels_.dispatch(command, kernels_.p().group_rms,
+                          ple_sets_.gated_norm, &push, kHcCount);
+        compute_barrier(command);
+        push = {kHcDim, kPleHistory, 3, 4};
+        kernels_.dispatch(command, kernels_.p().ple_conv_add,
+                          ple_sets_.conv_add, &push,
+                          (kHcDim + 63) / 64);
+        compute_barrier(command);
+    }
+
     void record_attention(VkCommandBuffer command, uint32_t layer,
                           uint32_t position) {
         LayerSets& sets = layers_[layer];
-        Push push{1, kDim, float_bits(1e-6f), 0};
-        kernels_.dispatch(command, kernels_.p().rms, sets.input_norm, &push, 1);
-        compute_barrier(command);
-        push = {kDim, 128, kDim / 4, kDim / 4};
+        Push push{kDim, 128, kDim / 4, kDim / 4};
         kernels_.dispatch(command, kernels_.p().quant, sets.hidden_quant, &push,
                           kDim / 128);
         compute_barrier(command);
 
         if (full_attention(layer)) {
-            push = {kFullQProj, kDim, kDim / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q4, sets.qgate, &push,
-                              kFullQProj / 8);
+            push = {12288, kDim, kDim / 4, 0};
+            kernels_.dispatch(command, kernels_.p().q4, sets.qgate, &push, 1536);
             push = {512, kDim, kDim / 4, 0};
             kernels_.dispatch(command, kernels_.p().q4, sets.key, &push, 64);
             kernels_.dispatch(command, kernels_.p().q4, sets.value, &push, 64);
             compute_barrier(command);
+#ifdef OVLLM_LONG_CONTEXT_FORK
+            push = {position, kAttentionHeads, kRopeDim / 2, max_context_};
+#else
             push = {full_index(layer), position, kAttentionHeads, kRopeDim / 2};
+#endif
             kernels_.dispatch(command, kernels_.p().qk, sets.qk, &push,
                               kAttentionHeads);
+#ifdef OVLLM_LONG_CONTEXT_FORK
+            push = {position, max_context_, 0, 0};
+#else
             push = {full_index(layer), position, 0, 0};
+#endif
             kernels_.dispatch(command, kernels_.p().store_value,
                               sets.store_value, &push,
                               (kKvHeads * kHeadDim + 63) / 64);
             compute_barrier(command);
+#ifdef OVLLM_LONG_CONTEXT_FORK
+            const uint32_t active_chunks = (position + kAttentionChunk) /
+                kAttentionChunk;
+            push = {position, max_context_, kAttentionChunk, active_chunks};
+            kernels_.dispatch(command, kernels_.p().attention, sets.attention,
+                              &push, active_chunks * (kAttentionHeads / 8u));
+            compute_barrier(command);
+            push = {active_chunks, kAttentionHeads, 0, 0};
+            kernels_.dispatch(command, kernels_.p().attention_reduce,
+                              sets.attention_reduce, &push, kAttentionHeads);
+#else
             push = {full_index(layer), position, kAttentionHeads, 0};
             kernels_.dispatch(command, kernels_.p().attention, sets.attention,
                               &push, kAttentionHeads);
+#endif
             compute_barrier(command);
             push = {kLinearValue, kAttentionHeads, 0, 0};
             kernels_.dispatch(command, kernels_.p().head_gate, sets.head_gate,
@@ -2681,8 +2218,8 @@ private:
                               &push, kLinearValue / 128);
             compute_barrier(command);
             push = {kDim, kLinearValue, kLinearValue / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q4_residual,
-                              sets.attention_out, &push, kDim / 8);
+            kernels_.dispatch(command, kernels_.p().q4,
+                               sets.attention_out, &push, kDim / 8);
         } else {
             push = {kLinearQkv, kDim, kDim / 4, 0};
             kernels_.dispatch(command, kernels_.p().q4, sets.gdn_qkv, &push,
@@ -2690,9 +2227,8 @@ private:
             push = {kLinearValue, kDim, kDim / 4, 0};
             kernels_.dispatch(command, kernels_.p().q4, sets.gdn_z, &push,
                               kLinearValue / 8);
-            push = {kLinearAb, kDim, kDim / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q4, sets.ab, &push,
-                              kLinearAb / 8);
+            push = {96, kDim, kDim / 4, 0};
+            kernels_.dispatch(command, kernels_.p().q4, sets.ab, &push, 12);
             compute_barrier(command);
             push = {kLinearQkv, kConvWidth, 0, 0};
             kernels_.dispatch(command, kernels_.p().conv, sets.conv, &push,
@@ -2707,45 +2243,15 @@ private:
                               &push, kLinearValue / 128);
             compute_barrier(command);
             push = {kDim, kLinearValue, kLinearValue / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q4_residual, sets.gdn_out,
-                              &push, kDim / 8);
+            kernels_.dispatch(command, kernels_.p().q4, sets.gdn_out,
+                               &push, kDim / 8);
         }
         compute_barrier(command);
-    }
-
-    void write_expert_trace(
-        uint32_t position, uint32_t layer,
-        const std::array<uint32_t, kTopK>& experts,
-        const std::array<float, kTopK>& weights,
-        const DeviceExpertCache::Selection& selection,
-        const HostExpertCache::Batch& sources,
-        std::chrono::steady_clock::time_point started,
-        std::chrono::steady_clock::time_point completed) {
-#if defined(XTLLM_QWEN3_CODER_NEXT) || defined(XTLLM_LONGCAT)
-        (void)position; (void)layer; (void)experts; (void)weights;
-        (void)selection; (void)sources; (void)started; (void)completed;
-        return;
-#else
-        if (!expert_trace_.enabled()) return;
-        uint8_t device_mask = 0, ram_mask = 0, disk_mask = 0;
-        for (uint32_t rank = 0; rank < kTopK; ++rank) {
-            const uint8_t bit = static_cast<uint8_t>(1u << rank);
-            if (!selection.misses[rank]) device_mask |= bit;
-            else if (sources.direct[rank]) disk_mask |= bit;
-            else ram_mask |= bit;
-        }
-        expert_trace_.event(position, layer, experts, weights, device_mask,
-                            ram_mask, disk_mask, selection.slots,
-                            started, completed);
-#endif
     }
 
     void record_router(VkCommandBuffer command, uint32_t layer) {
         LayerSets& sets = layers_[layer];
-        Push push{1, kDim, float_bits(1e-6f), 0};
-        kernels_.dispatch(command, kernels_.p().rms, sets.post_norm, &push, 1);
-        compute_barrier(command);
-        push = {kDim, 128, kDim / 4, kDim / 4};
+        Push push{kDim, 128, kDim / 4, kDim / 4};
         kernels_.dispatch(command, kernels_.p().quant, sets.hidden_quant, &push,
                           kDim / 128);
         compute_barrier(command);
@@ -2838,16 +2344,11 @@ private:
         kernels_.dispatch(command, kernels_.p().reduce, reduce_set_, &push,
                           kDim / 64);
         compute_barrier(command);
+        record_hc_apply(command, sets.mlp_hc);
     }
 
     void record_expert_rank(VkCommandBuffer command, uint32_t layer,
                             uint32_t rank) {
-        record_expert_rank_gate(command, layer, rank);
-        record_expert_rank_down(command, layer, rank);
-    }
-
-    void record_expert_rank_gate(VkCommandBuffer command, uint32_t layer,
-                                 uint32_t rank) {
         LayerSets& sets = layers_[layer];
         Push push{rank, kDim / 4, 0, 0};
         kernels_.dispatch(command, kernels_.p().expert_gate,
@@ -2865,43 +2366,41 @@ private:
                           expert_rank_quant_sets_[rank], &push,
                           kMoeDim / 128u);
         compute_barrier(command);
-    }
-
-    void record_expert_rank_down(VkCommandBuffer command, uint32_t layer,
-                                 uint32_t rank) {
-        LayerSets& sets = layers_[layer];
-        Push push{rank, kTopK * kMoeDim / 4u, 0, 0};
+        push = {rank, kTopK * kMoeDim / 4u, 0, 0};
         kernels_.dispatch(command, kernels_.p().expert_down,
                           sets.expert_down[selected_slots_[rank]], &push,
                           kDim / 8);
         compute_barrier(command);
     }
 
-    void record_expert_finish(VkCommandBuffer command) {
+    void record_expert_finish(VkCommandBuffer command, uint32_t layer) {
         const Push push{kDim, kTopK, 0, 0};
         kernels_.dispatch(command, kernels_.p().reduce, reduce_set_, &push,
                           kDim / 64);
         compute_barrier(command);
+        record_hc_apply(command, layers_[layer].mlp_hc);
     }
 
     void destroy_all() {
-        if (verify2_enabled_) {
-            destroy_buffer(runtime_, verify_recurrent_snapshot_);
-            destroy_buffer(runtime_, verify_conv_snapshot_);
-            for (Buffer& buffer : verify_quant_) destroy_buffer(runtime_, buffer);
-            for (Buffer& buffer : verify_hidden_) destroy_buffer(runtime_, buffer);
-            destroy_buffer(runtime_, verify_routing_);
-            destroy_buffer(runtime_, verify_tokens_);
-        }
-        for (Buffer* buffer : {&rope_, &kv_cache_, &recurrent_state_,
+        for (Buffer* buffer : {&rope_, &kv_cache_,
+#ifdef OVLLM_LONG_CONTEXT_FORK
+                               &attention_partial_,
+#endif
+                               &recurrent_state_,
                                &conv_state_, &argmax_workspace_, &logits_,
+                               &ple_state_, &ple_gated_normed_, &ple_gated_,
+                               &ple_value_, &ple_key_normed_, &ple_key_,
+                               &ple_embedding_, &ple_host_,
                                &expert_outputs_, &expert_quant_,
                                &expert_intermediate_, &router_logits_,
                                &shared_expert_gate_, &shared_output_,
                                &shared_intermediate_, &shared_up_values_,
                                &shared_gate_values_, &quant_, &ab_, &z_,
                                &convolved_qkv_, &mixed_qkv_, &context_,
-                               &value_, &key_, &qgate_, &normalized_, &hidden_,
+                               &value_, &key_, &qgate_, &block_output_,
+                               &hc_injection_, &hc_low_quant_, &hc_low_,
+                               &hc_mix_weights_, &hc_normed_, &hyper_,
+                               &normalized_, &hidden_,
                                &routing_, &token_})
             destroy_buffer(runtime_, *buffer);
     }
@@ -2909,89 +2408,84 @@ private:
     const Runtime& runtime_;
     DeviceWeights weights_;
     ExpertFile expert_file_;
+    PleLookup ple_lookup_;
     HostExpertCache host_cache_;
     DeviceExpertCache device_cache_;
     Kernels kernels_;
     dsv4::FiniteQueue compute_, transfer_;
     Buffer token_{}, routing_{}, hidden_{}, normalized_{};
+    Buffer hyper_{}, hc_normed_{}, hc_mix_weights_{}, hc_low_{};
+    Buffer hc_low_quant_{}, hc_injection_{}, block_output_{};
     Buffer qgate_{}, key_{}, value_{}, context_{};
     Buffer mixed_qkv_{}, convolved_qkv_{}, z_{}, ab_{}, quant_{};
     Buffer shared_gate_values_{}, shared_up_values_{}, shared_intermediate_{};
     Buffer shared_output_{}, shared_expert_gate_{}, router_logits_{};
     Buffer expert_intermediate_{}, expert_quant_{}, expert_outputs_{};
     Buffer logits_{}, argmax_workspace_{}, conv_state_{}, recurrent_state_{};
+    Buffer ple_host_{}, ple_embedding_{}, ple_key_{}, ple_key_normed_{};
+    Buffer ple_value_{}, ple_gated_{}, ple_gated_normed_{}, ple_state_{};
     Buffer kv_cache_{}, rope_{};
+#ifdef OVLLM_LONG_CONTEXT_FORK
+    Buffer attention_partial_{};
+    uint32_t max_context_ = kDefaultContext;
+    uint32_t attention_chunks_ = 2;
+#endif
     std::vector<Buffer> staging_;
-    std::vector<Buffer> verify_staging_;
-    Buffer verify_tokens_{}, verify_routing_{};
-    std::array<Buffer, 2> verify_hidden_{}, verify_quant_{};
-    Buffer verify_conv_snapshot_{}, verify_recurrent_snapshot_{};
     std::vector<LayerSets> layers_;
     std::array<uint32_t, kTopK> selected_slots_{};
-    VkDescriptorSet embedding_set_{}, final_norm_set_{}, final_quant_set_{};
+    HcSets final_hc_{};
+    PleSets ple_sets_{};
+    VkDescriptorSet embedding_set_{}, repeat_set_{}, final_quant_set_{};
     VkDescriptorSet lm_head_set_{}, argmax_set_{}, expert_quant_set_{};
     std::array<VkDescriptorSet, kTopK> expert_rank_quant_sets_{};
     VkDescriptorSet reduce_set_{}, expert_gate_batch_set_{}, expert_down_batch_set_{};
-    std::array<VkDescriptorSet, 2> verify_embedding_sets_{};
     bool batch_experts_ = false;
     bool progressive_experts_ = false;
-    bool verify2_enabled_ = false;
-    bool tensor_split_ = false;
     std::unique_ptr<dsv4::experiment::FiniteQueueRing<12>> progressive_compute_;
-    ovllm_trace::Writer expert_trace_;
     uint64_t activation_device_bytes_ = 0;
     uint64_t transfer_bytes_ = 0, host_copy_bytes_ = 0;
+    uint64_t ple_transfer_bytes_ = 0;
     uint64_t cold_stalled_layers_ = 0;
     uint64_t progressive_layers_ = 0;
     uint64_t progressive_resident_ranks_ = 0;
     uint64_t progressive_ram_ranks_ = 0;
     uint64_t progressive_disk_ranks_ = 0;
-    uint64_t verify_unique_experts_ = 0;
-    uint64_t verify_occurrences_ = 0;
-    uint64_t verify_reused_occurrences_ = 0;
     double decode_seconds_ = 0, pre_seconds_ = 0;
     double acquisition_seconds_ = 0, expert_seconds_ = 0;
 };
 
 static uint64_t ram_budget() {
-    const char* text = std::getenv("QWEN_RAM_GIB");
+    const char* text = std::getenv("QWEN38_RAM_GIB");
     const double gib = text ? std::stod(text) : 24.0;
     if (gib < 2.0 || gib > 56.0)
-        throw std::runtime_error("QWEN_RAM_GIB must be 2..56");
+        throw std::runtime_error("QWEN38_RAM_GIB must be 2..56");
     return static_cast<uint64_t>(gib * 1024.0 * 1024.0 * 1024.0);
 }
 
 static uint32_t device_slots() {
-    const char* text = std::getenv("QWEN_DEVICE_SLOTS_PER_LAYER");
-    const uint32_t slots = text ? static_cast<uint32_t>(std::stoul(text)) :
-#ifdef XTLLM_LONGCAT
-        80u;
-#elif defined(XTLLM_QWEN3_CODER_NEXT)
-        120u;
-#else
-        17u;
-#endif
-    if (slots < kTopK || slots > kMaximumDeviceSlots)
-        throw std::runtime_error("QWEN_DEVICE_SLOTS_PER_LAYER is outside the model cache bounds");
+    const char* text = std::getenv("QWEN38_DEVICE_SLOTS_PER_LAYER");
+    const uint32_t slots = text ? static_cast<uint32_t>(std::stoul(text)) : 60;
+    if (slots < kTopK || slots > kExperts)
+        throw std::runtime_error("QWEN38_DEVICE_SLOTS_PER_LAYER must be 10..512");
     return slots;
 }
 
-} // namespace qwen35
+} // namespace qwen38
 
-int qwen35_cli_main(int argc, char** argv) {
+int qwen38_cli_main(int argc, char** argv) {
     Runtime runtime{};
     try {
         if (argc < 3) {
-            std::cerr << "usage: amd_qwen35.exe <runtime-dir> "
+            std::cerr << "usage: amd_qwen38.exe <runtime-dir> "
                          "<prompt|--inspect|--tokenize> [new-tokens]\n";
             return 2;
         }
         const std::filesystem::path directory = argv[1];
         dsv4::ReadOnlyMapping tokenizer_file((directory / "tokenizer.ovb").string());
-        qwen35::Tokenizer tokenizer(tokenizer_file);
+        qwen38::Tokenizer tokenizer(tokenizer_file);
         if (std::strcmp(argv[2], "--tokenize") == 0) {
             if (argc < 4) throw std::runtime_error("tokenize text required");
-            const bool thinking = std::getenv("QWEN_NO_THINK") == nullptr;
+            const bool thinking = std::getenv("QWEN38_NO_THINK") == nullptr;
             const std::vector<uint32_t> tokens =
                 tokenizer.chat_prompt(argv[3], thinking);
             std::cout << "tokens:";
@@ -2999,14 +2493,11 @@ int qwen35_cli_main(int argc, char** argv) {
             std::cout << '\n';
             return 0;
         }
-        qwen35::SharedIndex index(directory / "model-q4g64.ovs");
-        qwen35::ExpertFile inspect_experts(directory / "experts-q4g64.ovx");
+        qwen38::SharedIndex index(directory / "model-q4g64.ovs");
+        qwen38::ExpertFile inspect_experts(directory / "experts-q4g64.ovx");
+        qwen38::PleLookup inspect_ple(directory / "ple-fp8.ovp");
         if (std::strcmp(argv[2], "--inspect") == 0) {
-#ifdef XTLLM_QWEN3_CODER_NEXT
-            std::cout << "Qwen3-Coder-Next-FP8 derived Q4 runtime containers validated\n";
-#else
-            std::cout << "Qwen3.5-122B-A10B runtime containers validated\n";
-#endif
+            std::cout << "Qwen3.8-Flash-Next runtime containers validated\n";
             return 0;
         }
 
@@ -3014,39 +2505,32 @@ int qwen35_cli_main(int argc, char** argv) {
         std::cout << "Vulkan device: " << runtime.properties.deviceName << '\n';
         const uint32_t count = argc >= 4
             ? static_cast<uint32_t>(std::stoul(argv[3])) : 8;
-        const uint64_t budget = qwen35::ram_budget();
-        const uint32_t slots = qwen35::device_slots();
-        const bool thinking = std::getenv("QWEN_NO_THINK") == nullptr;
-        const std::vector<uint32_t> prompt =
-            tokenizer.chat_prompt(argv[2], thinking);
+        const uint64_t budget = qwen38::ram_budget();
+        const uint32_t slots = qwen38::device_slots();
+        const bool thinking = std::getenv("QWEN38_NO_THINK") == nullptr;
         std::vector<uint32_t> result;
         double decode = 0, pre = 0, acquisition = 0, expert = 0;
         uint64_t device_hits = 0, device_misses = 0;
         uint64_t ram_hits = 0, ram_misses = 0, disk = 0, transfer = 0;
+        uint64_t ple_disk = 0, ple_transfer = 0;
         uint64_t ram_bypasses = 0;
         uint64_t host_copy = 0, cold_layers = 0, ram = 0, vram = 0;
         uint64_t progressive_layers = 0, progressive_resident = 0;
         uint64_t progressive_ram = 0, progressive_disk = 0;
         uint32_t host_slots = 0;
         {
-            qwen35::QwenEngine engine(
+            qwen38::QwenEngine engine(
                 runtime, index, directory / "experts-q4g64.ovx",
+                directory / "ple-fp8.ovp",
                 std::filesystem::absolute(argv[0]).parent_path(), budget, slots);
             std::cout << "precision: Q4G64T experts/shared/dense, "
-                         "Q8 embedding/head/router\n"
+                         "Q8 embedding/head/router, official FP8 PLE\n"
                       << "RAM budget: "
                       << double(budget) / double(1ull << 30) << " GiB\n"
-                      << "expert slots device/RAM: ";
-            if (engine.device_profiled())
-                std::cout << engine.device_total_slots() << " total ("
-                          << engine.device_minimum_slots() << ".."
-                          << engine.device_maximum_slots() << " per layer, profiled)";
-            else
-                std::cout << slots << " per layer";
-            std::cout << " / " << engine.host_slots() << " global\n"
-                      << "host expert eviction: "
-                      << (std::getenv("QWEN_HOST_LRU") ? "LRU" : "LFU") << '\n';
-            result = engine.generate(tokenizer, prompt, count);
+                      << "expert slots device/RAM: " << slots
+                      << " per layer / " << engine.host_slots() << " global\n";
+            result = engine.generate(tokenizer,
+                tokenizer.chat_prompt(argv[2], thinking), count);
             decode = engine.decode_seconds();
             pre = engine.pre_seconds();
             acquisition = engine.acquisition_seconds();
@@ -3057,7 +2541,9 @@ int qwen35_cli_main(int argc, char** argv) {
             ram_misses = engine.ram_misses();
             ram_bypasses = engine.ram_admission_bypasses();
             disk = engine.disk_bytes();
+            ple_disk = engine.ple_disk_bytes();
             transfer = engine.transfer_bytes();
+            ple_transfer = engine.ple_transfer_bytes();
             host_copy = engine.host_copy_bytes();
             cold_layers = engine.cold_stalled_layers();
             progressive_layers = engine.progressive_layers();
@@ -3082,6 +2568,8 @@ int qwen35_cli_main(int argc, char** argv) {
                   << "expert SSD / host-copy / H2D bytes per output: "
                   << disk / divisor << " / " << host_copy / divisor << " / "
                   << transfer / divisor << '\n'
+                  << "PLE SSD / H2D bytes per output: "
+                  << ple_disk / divisor << " / " << ple_transfer / divisor << '\n'
                   << "acquisition ms per output: "
                   << acquisition * 1000.0 / divisor << '\n'
                   << "cold-expert stalled layers per output: "
@@ -3103,11 +2591,7 @@ int qwen35_cli_main(int argc, char** argv) {
         FreeLibrary(runtime.loader);
         return 0;
     } catch (const std::exception& error) {
-#ifdef XTLLM_QWEN3_CODER_NEXT
-        std::cerr << "Qwen3-Coder-Next runtime error: " << error.what() << '\n';
-#else
-        std::cerr << "Qwen3.5 runtime error: " << error.what() << '\n';
-#endif
+        std::cerr << "Qwen3.8 runtime error: " << error.what() << '\n';
         if (runtime.device) vkfn::DestroyDevice(runtime.device, nullptr);
         if (runtime.instance) vkfn::DestroyInstance(runtime.instance, nullptr);
         if (runtime.loader) FreeLibrary(runtime.loader);
@@ -3115,8 +2599,8 @@ int qwen35_cli_main(int argc, char** argv) {
     }
 }
 
-#ifndef OVLLM_QWEN35_RUNTIME_ONLY
+#ifndef OVLLM_QWEN38_RUNTIME_ONLY
 int main(int argc, char** argv) {
-    return qwen35_cli_main(argc, argv);
+    return qwen38_cli_main(argc, argv);
 }
 #endif

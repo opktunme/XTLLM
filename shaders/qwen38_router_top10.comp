@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Logits { float v[]; } logits;
+layout(set=0,binding=1,std430) writeonly buffer Routes { uint v[]; } routes;
+layout(set=0,binding=2,std430) readonly buffer DummyA { uint v; } da;
+layout(set=0,binding=3,std430) readonly buffer DummyB { uint v; } db;
+layout(push_constant) uniform P { uint experts; uint top_k; uint unused0; uint unused1; } p;
+const uint MAX_E=512u,MAX_K=10u,WEIGHT_OFFSET=16u;
+shared float values[MAX_E];
+void main(){
+    uint lane=gl_LocalInvocationID.x;
+    for(uint s=0u;s<8u;++s){uint e=lane+s*64u;if(e<min(p.experts,MAX_E))values[e]=logits.v[e];}
+    barrier();
+    if(lane==0u){
+        uint ids[MAX_K];float selected[MAX_K];uint k=min(p.top_k,MAX_K);
+        for(uint r=0u;r<MAX_K;++r){uint best_id=0u;float best=-3.402823466e+38;
+            if(r<k){for(uint e=0u;e<min(p.experts,MAX_E);++e){bool used=false;for(uint q=0u;q<r;++q)used=used||ids[q]==e;if(!used&&values[e]>best){best=values[e];best_id=e;}}}
+            ids[r]=best_id;selected[r]=best;
+        }
+        float maximum=selected[0],total=0.0;for(uint r=0u;r<k;++r)total+=exp(selected[r]-maximum);
+        for(uint r=0u;r<MAX_K;++r){routes.v[r]=r<k?ids[r]:0u;routes.v[WEIGHT_OFFSET+r]=floatBitsToUint(r<k?exp(selected[r]-maximum)/total:0.0);}
+    }
+}
