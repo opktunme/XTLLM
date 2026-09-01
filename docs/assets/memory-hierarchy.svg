@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="250" viewBox="0 0 1200 250" role="img" aria-labelledby="title desc">
+  <title id="title">XTLLM memory hierarchy</title>
+  <desc id="desc">Cold experts move from NVMe through a budgeted RAM cache and model-specific VRAM cache into bounded Vulkan kernels. Long-context state in host memory also feeds the Vulkan kernels, which produce output tokens.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1324"/>
+      <stop offset="1" stop-color="#172554"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#93c5fd"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="250" rx="22" fill="url(#background)"/>
+
+  <g fill="#10203d" stroke="#60a5fa" stroke-width="2">
+    <rect x="35" y="55" width="185" height="76" rx="15"/>
+    <rect x="275" y="55" width="205" height="76" rx="15"/>
+    <rect x="535" y="55" width="215" height="76" rx="15"/>
+    <rect x="805" y="55" width="215" height="76" rx="15"/>
+    <rect x="1065" y="55" width="100" height="76" rx="15"/>
+    <rect x="535" y="171" width="215" height="48" rx="14" stroke="#a78bfa"/>
+  </g>
+
+  <g stroke="#93c5fd" stroke-width="3" fill="none" marker-end="url(#arrow)">
+    <path d="M220 93 H267"/>
+    <path d="M480 93 H527"/>
+    <path d="M750 93 H797"/>
+    <path d="M1020 93 H1057"/>
+    <path d="M750 195 C785 195 785 139 820 130"/>
+  </g>
+
+  <g fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" text-anchor="middle">
+    <text x="127" y="86" font-size="20" font-weight="700">NVMe</text>
+    <text x="127" y="112" font-size="15" fill="#bfdbfe">cold expert store</text>
+    <text x="377" y="86" font-size="20" font-weight="700">System RAM</text>
+    <text x="377" y="112" font-size="15" fill="#bfdbfe">budgeted expert cache</text>
+    <text x="642" y="86" font-size="20" font-weight="700">VRAM</text>
+    <text x="642" y="112" font-size="15" fill="#bfdbfe">model-specific cache</text>
+    <text x="912" y="86" font-size="20" font-weight="700">Vulkan GPU</text>
+    <text x="912" y="112" font-size="15" fill="#bfdbfe">finite Q4 / NVFP4 kernels</text>
+    <text x="1115" y="86" font-size="20" font-weight="700">Output</text>
+    <text x="1115" y="112" font-size="15" fill="#bfdbfe">token</text>
+    <text x="642" y="201" font-size="16" font-weight="600">Host-memory context / K/V</text>
+  </g>
+
+  <g fill="#93c5fd" font-family="Segoe UI,Arial,sans-serif" font-size="13" text-anchor="middle">
+    <text x="244" y="42">async reads</text>
+    <text x="504" y="42">ready copies</text>
+    <text x="774" y="42">bounded work</text>
+  </g>
+</svg>

@@ -40,14 +40,9 @@ weights are **not** included.
 Most runtimes treat a model larger than VRAM as an exceptional case. XTLLM
 treats the hierarchy as the design:
 
-```mermaid
-flowchart LR
-    NVMe["NVMe cold expert store"] -->|bounded async reads| RAM["Budgeted RAM expert cache"]
-    RAM -->|rank-ready copies| VRAM["Model-specific VRAM expert cache"]
-    VRAM --> GPU["Finite Vulkan Q4 / NVFP4 kernels"]
-    KV["BF16 long-context K/V in host memory"] --> GPU
-    GPU --> OUT["Greedy output token"]
-```
+<p align="center">
+  <img src="docs/assets/memory-hierarchy.svg" alt="XTLLM memory hierarchy: NVMe experts flow through budgeted RAM and model-specific VRAM caches into bounded Vulkan kernels; host-memory context joins the GPU path" width="100%">
+</p>
 
 - one executable auto-detects the converted model;
 - live Vulkan memory-budget sizing chooses a safe model-specific expert cache;
