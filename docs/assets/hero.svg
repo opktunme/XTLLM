@@ -17,7 +17,7 @@
     <path d="M28 35h60M28 58h43M28 81h60" stroke="url(#a)" stroke-width="10" stroke-linecap="round"/>
   </g>
   <text x="230" y="125" fill="#f8fafc" font-family="Segoe UI,Arial" font-size="58" font-weight="700">XTLLM</text>
-  <text x="232" y="176" fill="#bfdbfe" font-family="Segoe UI,Arial" font-size="25">Huge MoE models. Consumer AMD GPUs. Honest memory budgets.</text>
+  <text x="232" y="176" fill="#bfdbfe" font-family="Segoe UI,Arial" font-size="25">LongCat 20 tok/s. Qwen3.8 8.49 accepted tok/s. One RX 6700 XT.</text>
   <g font-family="Segoe UI,Arial" font-size="18" font-weight="600">
     <rect x="232" y="215" width="125" height="38" rx="19" fill="#1e40af"/><text x="257" y="241" fill="white">Vulkan 1.3</text>
     <rect x="372" y="215" width="142" height="38" rx="19" fill="#5b21b6"/><text x="395" y="241" fill="white">Q4 / NVFP4</text>

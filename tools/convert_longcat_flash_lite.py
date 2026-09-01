@@ -86,8 +86,8 @@ def write_plan(output:BinaryIO,store:b.SafeStore,plan:Plan):
     rows,cols=plan.shape; w,wb,s,sb=b.pack_q4g64(output,chunks(store,plan.sources[0]),rows,cols)
     return Result(plan,w,wb,s,sb)
 
-def write_shared(outdir,store,all_plans):
-    final,partial=outdir/"model-q4g64.ovs",outdir/"model-q4g64.ovs.partial"
+def write_shared(outdir,store,all_plans,filename="model-q4g64.ovs"):
+    final,partial=outdir/filename,outdir/f"{filename}.partial"
     if final.exists(): print(f"shared: keeping {final}"); return
     groups=[(0,-1,[x for x in all_plans if x.group<0])]+[(1,l,[x for x in all_plans if x.group==l]) for l in range(LAYERS)]
     data_offset=b.align_value(b.HEADER_BYTES+len(all_plans)*b.TENSOR_ENTRY.size,4096); results=[]; group_rows=[]

@@ -1,0 +1,21 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Batched Top-10 gate/up projection.  Every selected record is in the same
+// per-layer device arena, so route ranks only need a compact slot table.
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Act { uint v[]; } act;
+layout(set=0,binding=1,std430) readonly buffer ExpertArena { uint v[]; } arena;
+layout(set=0,binding=2,std430) readonly buffer Routes { uint v[]; } routes;
+layout(set=0,binding=3,std430) writeonly buffer Out { float v[]; } out_data;
+layout(push_constant) uniform P { uint rank_unused; uint activation_scale_u32; uint unused0; uint unused1; } p;
+
+const uint TOPK=10u,EDIM=640u,GROUPS=40u,WORDS=8u;
+const uint RECORD_WORDS=653312u,SLOT_OFFSET=26u;
+const uint GATE_S=0u,GATE_W=51200u,UP_S=870400u,UP_W=921600u;
+uint sn(uint n){uint b=(n&15u)|((n&240u)<<4u)|((n&3840u)<<8u)|((n&61440u)<<12u);uint s=b&0x08080808u;return b|(s<<1u)|(s<<2u)|(s<<3u)|(s<<4u);}
+int dq(uint w,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sn(w&65535u)))+dotPacked4x8EXT(int(a1),int(sn(w>>16u)));}
+float bf(uint base,uint byte_offset,uint index){uint h=(arena.v[base+(byte_offset>>2u)+(index>>1u)]>>((index&1u)*16u))&65535u;return uintBitsToFloat(h<<16u);}
+float dotrow(uint base,uint wb,uint sb,uint row,uint group,uint frag){uint wi=frag*4u;uint weight=base+(wb>>2u)+row*(GROUPS*WORDS)+wi*GROUPS+group;uint ab=group*16u+wi*2u;int s=dq(arena.v[weight],act.v[ab],act.v[ab+1u]);s+=dq(arena.v[weight+GROUPS],act.v[ab+2u],act.v[ab+3u]);s+=dq(arena.v[weight+2u*GROUPS],act.v[ab+4u],act.v[ab+5u]);s+=dq(arena.v[weight+3u*GROUPS],act.v[ab+6u],act.v[ab+7u]);return float(s)*bf(base,sb,row*GROUPS+group)*uintBitsToFloat(act.v[p.activation_scale_u32+(group>>1u)]);}
+void main(){uint rank=gl_WorkGroupID.y;if(rank>=TOPK)return;uint base=routes.v[SLOT_OFFSET+rank]*RECORD_WORDS;uint lane=gl_LocalInvocationID.x,frag=lane&1u,lg=lane>>1u,first=gl_WorkGroupID.x*8u;float g[8]=float[8](0,0,0,0,0,0,0,0),u[8]=float[8](0,0,0,0,0,0,0,0);for(uint group=lg;group<GROUPS;group+=32u)for(uint r=0u;r<8u;++r){uint row=first+r;if(row<EDIM){g[r]+=dotrow(base,GATE_W,GATE_S,row,group,frag);u[r]+=dotrow(base,UP_W,UP_S,row,group,frag);}}for(uint r=0u;r<8u;++r){g[r]=subgroupAdd(g[r]);u[r]=subgroupAdd(u[r]);}if(lane==0u)for(uint r=0u;r<8u;++r){uint row=first+r;if(row<EDIM){float x=g[r];out_data.v[rank*EDIM+row]=(x/(1.0+exp(-x)))*u[r];}}}

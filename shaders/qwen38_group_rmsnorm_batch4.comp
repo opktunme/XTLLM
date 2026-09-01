@@ -1,0 +1,8 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer I{float v[];}x;
+layout(set=0,binding=1,std430) readonly buffer G{float v[];}g;
+layout(set=0,binding=2,std430) writeonly buffer O{float v[];}o;
+layout(push_constant) uniform P{uint batches;uint branches;uint dim;uint eps;}p;
+void main(){uint rb=gl_WorkGroupID.x,b=rb/p.branches,r=rb%p.branches,l=gl_LocalInvocationID.x;if(b>=p.batches)return;uint base=(b*p.branches+r)*p.dim,gb=r*p.dim;float ss=0.0;for(uint c=l;c<p.dim;c+=64u){float z=x.v[base+c];ss+=z*z;}ss=subgroupAdd(ss);float iv=inversesqrt(ss/float(p.dim)+uintBitsToFloat(p.eps));for(uint c=l;c<p.dim;c+=64u)o.v[base+c]=x.v[base+c]*iv*(g.v[gb+c]+1.0);}

@@ -1,0 +1,14 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Act{uint v[];}a;
+layout(set=0,binding=1,std430) readonly buffer Expert{uint v[];}ex;
+layout(set=0,binding=2,std430) readonly buffer Meta{uint v[];}meta;
+layout(set=0,binding=3,std430) writeonly buffer Out{float v[];}o;
+layout(push_constant) uniform P{uint unique;uint a_stride;uint u0;uint u1;}p;
+const uint DIM=2560u,EDIM=640u,TOP=10u,GROUPS=40u,WORDS=6u,GS=0u,GW=51200u,US=665600u,UW=716800u;
+uint sx(uint x){uint r=0u;for(uint i=0u;i<4u;++i){uint c=(x>>(i*3u))&7u;c|=(c&4u)*62u;r|=c<<(i*8u);}return r;}
+int d3(uint c,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sx(c&4095u)))+dotPacked4x8EXT(int(a1),int(sx(c>>12u)));}
+float bf(uint off,uint i){uint h=(ex.v[(off>>2u)+(i>>1u)]>>((i&1u)*16u))&65535u;return uintBitsToFloat(h<<16u);}
+void main(){uint lane=gl_LocalInvocationID.x,frag=lane&1u,lg=lane>>1u,first=gl_WorkGroupID.x*2u;uint ranks[4]=uint[4](meta.v[p.unique*8u],meta.v[p.unique*8u+1u],meta.v[p.unique*8u+2u],meta.v[p.unique*8u+3u]);float g[8],u[8];for(uint i=0u;i<8u;++i){g[i]=0.0;u[i]=0.0;}for(uint group=lg;group<GROUPS;group+=32u){for(uint rr=0u;rr<2u;++rr){uint row=first+rr;if(row>=EDIM)continue;uint baseg=(GW>>2u)+row*(GROUPS*WORDS)+frag*3u*GROUPS+group,baseu=(UW>>2u)+row*(GROUPS*WORDS)+frag*3u*GROUPS+group;uint wg0=ex.v[baseg],wg1=ex.v[baseg+GROUPS],wg2=ex.v[baseg+2u*GROUPS],wu0=ex.v[baseu],wu1=ex.v[baseu+GROUPS],wu2=ex.v[baseu+2u*GROUPS];uint cg[4]=uint[4](wg0&0xffffffu,(wg0>>24u)|((wg1&0xffffu)<<8u),(wg1>>16u)|((wg2&255u)<<16u),wg2>>8u),cu[4]=uint[4](wu0&0xffffffu,(wu0>>24u)|((wu1&0xffffu)<<8u),(wu1>>16u)|((wu2&255u)<<16u),wu2>>8u);float gs=bf(GS,row*GROUPS+group),us=bf(US,row*GROUPS+group);for(uint b=0u;b<4u;++b){if(ranks[b]>=TOP)continue;uint ab=b*p.a_stride+group*16u+frag*8u;int dg=d3(cg[0],a.v[ab],a.v[ab+1u])+d3(cg[1],a.v[ab+2u],a.v[ab+3u])+d3(cg[2],a.v[ab+4u],a.v[ab+5u])+d3(cg[3],a.v[ab+6u],a.v[ab+7u]);int du=d3(cu[0],a.v[ab],a.v[ab+1u])+d3(cu[1],a.v[ab+2u],a.v[ab+3u])+d3(cu[2],a.v[ab+4u],a.v[ab+5u])+d3(cu[3],a.v[ab+6u],a.v[ab+7u]);float as=uintBitsToFloat(a.v[b*p.a_stride+DIM/4u+(group>>1u)]);g[b*2u+rr]+=float(dg)*gs*as;u[b*2u+rr]+=float(du)*us*as;}}}for(uint i=0u;i<8u;++i){g[i]=subgroupAdd(g[i]);u[i]=subgroupAdd(u[i]);}if(lane==0u)for(uint b=0u;b<4u;++b){uint rank=ranks[b];if(rank<TOP)for(uint rr=0u;rr<2u;++rr){uint row=first+rr;if(row<EDIM){float x=g[b*2u+rr];o.v[(b*TOP+rank)*EDIM+row]=(x/(1.0+exp(-x)))*u[b*2u+rr];}}}}

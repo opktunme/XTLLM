@@ -50,6 +50,28 @@ def find_model(value: str) -> dict[str, Any]:
     raise UserError(f"Unknown model '{value}'. Available aliases: {available}")
 
 
+def select_profile(model: dict[str, Any], value: str | None) -> tuple[str | None, dict[str, Any]]:
+    profiles = model.get("profiles")
+    if not profiles:
+        if value:
+            raise UserError(f"{model['name']} does not define inference profiles")
+        return None, {}
+    aliases = {"exact": "reference", "exact_ref": "reference", "default": model["default_profile"]}
+    requested = aliases.get((value or model["default_profile"]).casefold(),
+                            (value or model["default_profile"]).casefold())
+    if requested not in profiles:
+        available = ", ".join(profiles)
+        raise UserError(
+            f"Unknown profile '{value}' for {model['name']}. Available: {available}"
+        )
+    return requested, profiles[requested]
+
+
+def profile_requirements(model: dict[str, Any],
+                         profile: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    return [*model["required"], *((profile or {}).get("required", []))]
+
+
 def model_root(option: str | None) -> Path:
     configured = option or os.environ.get("XTLLM_MODELS") or os.environ.get("OVLLM_MODELS")
     return Path(configured).expanduser().resolve() if configured else ROOT / "models"
@@ -60,8 +82,10 @@ def model_paths(model: dict[str, Any], option: str | None) -> tuple[Path, Path, 
     return base, base / "checkpoint", base / "runtime"
 
 
-def find_engine(model: dict[str, Any] | None = None) -> Path:
-    executable_name = model.get("backend", "xtllm.exe") if model else "xtllm.exe"
+def find_engine(model: dict[str, Any] | None = None,
+                profile: dict[str, Any] | None = None) -> Path:
+    executable_name = (profile or {}).get(
+        "backend", model.get("backend", "xtllm.exe") if model else "xtllm.exe")
     configured = os.environ.get("XTLLM_ENGINE") or os.environ.get("OVLLM_ENGINE")
     configured_candidates: list[Path] = []
     if configured:
@@ -102,9 +126,10 @@ def existing_parent(path: Path) -> Path:
     return candidate
 
 
-def complete_runtime(model: dict[str, Any], runtime: Path) -> tuple[bool, list[str]]:
+def complete_runtime(model: dict[str, Any], runtime: Path,
+                     profile: dict[str, Any] | None = None) -> tuple[bool, list[str]]:
     missing: list[str] = []
-    for requirement in model["required"]:
+    for requirement in profile_requirements(model, profile):
         candidate = runtime / requirement["path"]
         if not candidate.is_file() or candidate.stat().st_size < requirement["min_bytes"]:
             missing.append(requirement["path"])
@@ -150,6 +175,11 @@ def command_models(_: argparse.Namespace) -> int:
     for model in MODELS:
         print(f"  {model['key']:<10} {model['name']}")
         print(f"             {model['repo']} @ {model['revision'][:12]}")
+        if model.get("profiles"):
+            choices = ", ".join(
+                f"{name}{' (default)' if name == model['default_profile'] else ''}"
+                for name in model["profiles"])
+            print(f"             profiles: {choices}")
     return 0
 
 
@@ -166,6 +196,21 @@ def command_doctor(args: argparse.Namespace) -> int:
                        f"{len(shaders)} beside executable"))
     except UserError as error:
         checks.append(("native engine", False, str(error)))
+    profile_backends: dict[str, Path] = {}
+    missing_backends: list[str] = []
+    for model in MODELS:
+        for profile in model.get("profiles", {}).values():
+            name = profile.get("backend", model.get("backend", "xtllm.exe"))
+            if name in profile_backends or name in missing_backends:
+                continue
+            try:
+                profile_backends[name] = find_engine(model, profile)
+            except UserError:
+                missing_backends.append(name)
+    if profile_backends or missing_backends:
+        detail = (f"{len(profile_backends)} found" if not missing_backends else
+                  f"missing: {', '.join(missing_backends)}")
+        checks.append(("profile backends", not missing_backends, detail))
     try:
         hf = hf_command()
         checks.append(("Hugging Face CLI", True, hf[0]))
@@ -187,19 +232,24 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 def command_setup(args: argparse.Namespace) -> int:
     model = find_model(args.model)
+    profile_name, profile = select_profile(model, args.profile)
     base, checkpoint, runtime = model_paths(model, args.model_root)
-    complete, missing = complete_runtime(model, runtime)
+    complete, missing = complete_runtime(model, runtime, profile)
     if complete:
-        print(f"{model['name']} is ready: {runtime}")
+        suffix = f" ({profile_name} profile)" if profile_name else ""
+        print(f"{model['name']}{suffix} is ready: {runtime}")
         return 0
 
     checkpoint_existing = tree_bytes(checkpoint) / GIB
     runtime_existing = tree_bytes(runtime) / GIB
     required = max(0.0, model["download_gib"] - checkpoint_existing)
-    required += max(0.0, model["runtime_gib"] - runtime_existing)
+    runtime_gib = profile.get("runtime_gib", model["runtime_gib"])
+    required += max(0.0, runtime_gib - runtime_existing)
     required += model["scratch_gib"]
     free = shutil.disk_usage(existing_parent(base)).free / GIB
     print(f"Model: {model['name']}")
+    if profile_name:
+        print(f"Profile: {profile_name} - {profile['label']}")
     print(f"Official checkpoint: {model['repo']} @ {model['revision']}")
     print(f"Destination: {base}")
     print(f"Missing runtime assets: {', '.join(missing)}")
@@ -228,6 +278,8 @@ def command_setup(args: argparse.Namespace) -> int:
         run_checked(command, env=environment, dry_run=args.dry_run)
 
     for step in model["conversion"]:
+        if "profiles" in step and profile_name not in step["profiles"]:
+            continue
         outputs = [runtime / item for item in step["when_missing"]]
         if all(item.is_file() for item in outputs):
             print(f"Skipping completed conversion step: {step['script']}")
@@ -242,7 +294,7 @@ def command_setup(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("Dry run complete; no download or conversion was performed.")
         return 0
-    complete, missing = complete_runtime(model, runtime)
+    complete, missing = complete_runtime(model, runtime, profile)
     if not complete:
         raise UserError(f"Conversion finished without required assets: {', '.join(missing)}")
     manifest = {
@@ -251,20 +303,23 @@ def command_setup(args: argparse.Namespace) -> int:
         "source": model["repo"],
         "revision": model["revision"],
         "created_utc": datetime.now(timezone.utc).isoformat(),
+        "profile": profile_name,
         "files": {item["path"]: (runtime / item["path"]).stat().st_size
-                  for item in model["required"]},
+                  for item in profile_requirements(model, profile)},
     }
     temporary = runtime / "xtllm-model.json.partial"
     temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, runtime / "xtllm-model.json")
     print(f"Ready: {runtime}")
-    print(f"Run: xtllm run {model['key']} \"Explain why the sky is blue.\"")
+    profile_option = f" --profile {profile_name}" if profile_name else ""
+    print(f"Run: xtllm run {model['key']} \"Explain why the sky is blue.\"{profile_option}")
     return 0
 
 
-def runtime_for(model: dict[str, Any], option: str | None) -> Path:
+def runtime_for(model: dict[str, Any], option: str | None,
+                profile: dict[str, Any] | None = None) -> Path:
     runtime = model_paths(model, option)[2]
-    complete, missing = complete_runtime(model, runtime)
+    complete, missing = complete_runtime(model, runtime, profile)
     if not complete:
         raise UserError(
             f"{model['name']} is not set up ({', '.join(missing)} missing). "
@@ -290,7 +345,8 @@ def engine_options(args: argparse.Namespace) -> list[str]:
     return result
 
 
-def standalone_settings(model: dict[str, Any], args: argparse.Namespace) -> dict[str, str]:
+def standalone_settings(model: dict[str, Any], profile: dict[str, Any],
+                        args: argparse.Namespace) -> dict[str, str]:
     spec = model["standalone"]
     if getattr(args, "context_gib", None) is not None or \
             getattr(args, "context_tokens", None) is not None or \
@@ -300,39 +356,60 @@ def standalone_settings(model: dict[str, Any], args: argparse.Namespace) -> dict
             "context and long-mode overrides are not available yet."
         )
     result = {
-        spec["ram_env"]: str(getattr(args, "ram_gib", None) or spec["default_ram_gib"]),
-        spec["slots_env"]: str(getattr(args, "device_slots", None) or spec["default_slots"]),
+        spec["ram_env"]: str(getattr(args, "ram_gib", None) or
+                             profile.get("default_ram_gib", spec["default_ram_gib"])),
+        spec["slots_env"]: str(getattr(args, "device_slots", None) or
+                               profile.get("default_slots", spec["default_slots"])),
     }
     if not getattr(args, "no_prewarm", False):
         result[spec["prewarm_env"]] = "1"
     no_think = spec.get("no_think_env")
     if no_think and not getattr(args, "think", False):
         result[no_think] = "1"
+    result.update(profile.get("env", {}))
     return result
 
 
-def standalone_environment(model: dict[str, Any], args: argparse.Namespace) -> tuple[dict[str, str], dict[str, str]]:
+def standalone_environment(model: dict[str, Any], profile: dict[str, Any],
+                           args: argparse.Namespace) -> tuple[dict[str, str], dict[str, str]]:
     spec = model["standalone"]
-    settings = standalone_settings(model, args)
+    settings = standalone_settings(model, profile, args)
     environment = os.environ.copy()
-    for key in (spec["ram_env"], spec["slots_env"], spec["prewarm_env"],
-                spec.get("no_think_env")):
-        if key:
-            environment.pop(key, None)
+    prefixes = tuple(spec.get("clear_env_prefixes", ()))
+    if prefixes:
+        for key in list(environment):
+            if key.startswith(prefixes):
+                environment.pop(key, None)
+    else:
+        for key in (spec["ram_env"], spec["slots_env"], spec["prewarm_env"],
+                    spec.get("no_think_env")):
+            if key:
+                environment.pop(key, None)
     environment.update(settings)
     return environment, settings
 
 
+def print_profile_warning(profile: dict[str, Any]) -> None:
+    if profile.get("warning"):
+        print(f"WARNING: {profile['warning']}", file=sys.stderr)
+
+
 def command_plan(args: argparse.Namespace) -> int:
     model = find_model(args.model)
-    runtime = runtime_for(model, args.model_root)
+    profile_name, profile = select_profile(model, args.profile)
+    runtime = runtime_for(model, args.model_root, profile)
     if "standalone" in model:
-        _, settings = standalone_environment(model, args)
+        _, settings = standalone_environment(model, profile, args)
         print(f"Model: {model['name']}")
-        print(f"Backend: {find_engine(model)}")
+        if profile_name:
+            print(f"Profile: {profile_name} - {profile['label']}")
+        print(f"Backend: {find_engine(model, profile)}")
         print(f"Runtime: {runtime}")
         for key, value in settings.items():
             print(f"{key}={value}")
+        if profile.get("measured_tok_s"):
+            print(f"Measured decode: {profile['measured_tok_s']:.2f} tok/s on the validation system")
+        print_profile_warning(profile)
         print("Context: validated short-context backend")
         return 0
     command = [str(find_engine(model)), *engine_options(args), "--plan", str(runtime)]
@@ -342,11 +419,14 @@ def command_plan(args: argparse.Namespace) -> int:
 
 def command_run(args: argparse.Namespace) -> int:
     model = find_model(args.model)
-    runtime = runtime_for(model, args.model_root)
+    _, profile = select_profile(model, args.profile)
+    runtime = runtime_for(model, args.model_root, profile)
     environment = None
     if "standalone" in model:
-        environment, _ = standalone_environment(model, args)
-        command = [str(find_engine(model)), str(runtime), args.prompt, str(args.tokens)]
+        environment, _ = standalone_environment(model, profile, args)
+        print_profile_warning(profile)
+        command = [str(find_engine(model, profile)), str(runtime), args.prompt,
+                   str(args.tokens)]
     else:
         command = [str(find_engine(model)), *engine_options(args), "--tokens", str(args.tokens),
                    str(runtime), args.prompt]
@@ -356,13 +436,16 @@ def command_run(args: argparse.Namespace) -> int:
 
 def command_chat(args: argparse.Namespace) -> int:
     model = find_model(args.model)
-    runtime = runtime_for(model, args.model_root)
+    profile_name, profile = select_profile(model, args.profile)
+    runtime = runtime_for(model, args.model_root, profile)
     server = ROOT / "tools" / "xtllm_chat_server.py"
-    command = [sys.executable, str(server), "--engine", str(find_engine(model)),
-               "--runtime", str(runtime), "--model-name", model["name"],
+    display_name = model["name"] + (f" · {profile_name}" if profile_name else "")
+    command = [sys.executable, str(server), "--engine", str(find_engine(model, profile)),
+               "--runtime", str(runtime), "--model-name", display_name,
                "--port", str(args.port), "--tokens", str(args.tokens)]
     if "standalone" in model:
-        _, settings = standalone_environment(model, args)
+        _, settings = standalone_environment(model, profile, args)
+        print_profile_warning(profile)
         command.append("--standalone")
         for key, value in settings.items():
             command.append(f"--engine-env={key}={value}")
@@ -377,6 +460,8 @@ def command_chat(args: argparse.Namespace) -> int:
 
 def add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-root", help="model storage root (or XTLLM_MODELS)")
+    parser.add_argument("--profile",
+                        help="inference profile (reference, full, or fast where available)")
     parser.add_argument("--ram-gib", type=float)
     parser.add_argument("--context-gib", type=float)
     parser.add_argument("--context-tokens", type=int)
@@ -398,6 +483,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup = subparsers.add_parser("setup", help="download and convert a checkpoint")
     setup.add_argument("model")
     setup.add_argument("--model-root")
+    setup.add_argument("--profile",
+                       help="convert the selected profile (defaults to the model's full profile)")
     setup.add_argument("--hf-token", help="Hugging Face token (prefer HF_TOKEN)")
     setup.add_argument("--yes", action="store_true")
     setup.add_argument("--dry-run", action="store_true")

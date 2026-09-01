@@ -1,0 +1,7 @@
+#version 450
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer B{float v[];}block_data;
+layout(set=0,binding=1,std430) readonly buffer I{float v[];}inj;
+layout(set=0,binding=2,std430) buffer H{float v[];}h;
+layout(push_constant) uniform P{uint batches;uint dim;uint branches;uint divisor;}p;
+void main(){uint i=gl_GlobalInvocationID.x,b=i/(p.dim*p.branches),q=i%(p.dim*p.branches),r=q/p.dim,d=q%p.dim;if(b>=p.batches)return;float w=2.0/(1.0+exp(-inj.v[b*p.branches+r]/uintBitsToFloat(p.divisor)));h.v[i]+=block_data.v[b*p.dim+d]*w;}

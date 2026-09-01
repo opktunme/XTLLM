@@ -1,0 +1,14 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=32,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Act{uint v[];}a;
+layout(set=0,binding=1,std430) readonly buffer Expert{uint v[];}ex;
+layout(set=0,binding=2,std430) readonly buffer Meta{uint v[];}meta;
+layout(set=0,binding=3,std430) writeonly buffer Out{float v[];}o;
+layout(push_constant) uniform P{uint unique;uint scale_base;uint u0;uint u1;}p;
+const uint DIM=2560u,EDIM=640u,TOP=10u,GROUPS=10u,WORDS=6u,DS=1331200u,DW=1382400u;
+uint sx(uint x){uint r=0u;for(uint i=0u;i<4u;++i){uint c=(x>>(i*3u))&7u;c|=(c&4u)*62u;r|=c<<(i*8u);}return r;}
+int d3(uint c,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sx(c&4095u)))+dotPacked4x8EXT(int(a1),int(sx(c>>12u)));}
+float bf(uint i){uint h=(ex.v[(DS>>2u)+(i>>1u)]>>((i&1u)*16u))&65535u;return uintBitsToFloat(h<<16u);}
+void main(){uint lane=gl_LocalInvocationID.x,frag=lane&1u,group=lane>>1u,first=gl_WorkGroupID.x*2u;uint ranks[4]=uint[4](meta.v[p.unique*8u],meta.v[p.unique*8u+1u],meta.v[p.unique*8u+2u],meta.v[p.unique*8u+3u]);float sum[8];for(uint i=0u;i<8u;++i)sum[i]=0.0;if(group<GROUPS){for(uint rr=0u;rr<2u;++rr){uint row=first+rr;if(row>=DIM)continue;uint base=(DW>>2u)+row*(GROUPS*WORDS)+frag*3u*GROUPS+group,w0=ex.v[base],w1=ex.v[base+GROUPS],w2=ex.v[base+2u*GROUPS],c0=w0&0xffffffu,c1=(w0>>24u)|((w1&0xffffu)<<8u),c2=(w1>>16u)|((w2&255u)<<16u),c3=w2>>8u;float ws=bf(row*GROUPS+group);for(uint b=0u;b<4u;++b){uint rank=ranks[b];if(rank>=TOP)continue;uint idx=b*TOP+rank,ab=idx*(EDIM/4u)+group*16u+frag*8u;int d=d3(c0,a.v[ab],a.v[ab+1u])+d3(c1,a.v[ab+2u],a.v[ab+3u])+d3(c2,a.v[ab+4u],a.v[ab+5u])+d3(c3,a.v[ab+6u],a.v[ab+7u]);float as=uintBitsToFloat(a.v[p.scale_base+idx*5u+(group>>1u)]);sum[b*2u+rr]+=float(d)*as*ws;}}}for(uint i=0u;i<8u;++i)sum[i]=subgroupAdd(sum[i]);if(lane==0u)for(uint b=0u;b<4u;++b){uint rank=ranks[b];if(rank<TOP){float rw=uintBitsToFloat(meta.v[p.unique*8u+4u+b]);for(uint rr=0u;rr<2u;++rr){uint row=first+rr;if(row<DIM)o.v[(b*TOP+rank)*DIM+row]=sum[b*2u+rr]*rw;}}}}

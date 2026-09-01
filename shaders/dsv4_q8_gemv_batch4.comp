@@ -1,0 +1,10 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer A{uint v[];}a;
+layout(set=0,binding=1,std430) readonly buffer W{uint v[];}w;
+layout(set=0,binding=2,std430) readonly buffer S{float v[];}s;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];}o;
+layout(push_constant) uniform P{uint rows;uint inner;uint a_stride;uint o_stride;}p;
+void main(){uint lane=gl_LocalInvocationID.x,first=gl_WorkGroupID.x*4u,packed=(p.inner+3u)/4u;float sum[16];for(uint i=0u;i<16u;++i)sum[i]=0.0;for(uint x=lane;x<packed;x+=64u){uint av[4]=uint[4](a.v[x],a.v[p.a_stride+x],a.v[2u*p.a_stride+x],a.v[3u*p.a_stride+x]);float as[4]=float[4](uintBitsToFloat(a.v[packed+x/32u]),uintBitsToFloat(a.v[p.a_stride+packed+x/32u]),uintBitsToFloat(a.v[2u*p.a_stride+packed+x/32u]),uintBitsToFloat(a.v[3u*p.a_stride+packed+x/32u]));for(uint r=0u;r<4u;++r){uint row=first+r;if(row<p.rows){int ww=int(w.v[row*packed+x]);for(uint b=0u;b<4u;++b)sum[b*4u+r]+=float(dotPacked4x8EXT(int(av[b]),ww))*as[b];}}}for(uint i=0u;i<16u;++i)sum[i]=subgroupAdd(sum[i]);if(lane==0u)for(uint b=0u;b<4u;++b)for(uint r=0u;r<4u;++r){uint row=first+r;if(row<p.rows)o.v[b*p.o_stride+row]=sum[b*4u+r]*s.v[row];}}

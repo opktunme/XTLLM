@@ -1,0 +1,14 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=32,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Act{uint v[];}act;
+layout(set=0,binding=1,std430) readonly buffer Arena{uint v[];}arena;
+layout(set=0,binding=2,std430) readonly buffer Routes{uint v[];}routes;
+layout(set=0,binding=3,std430) writeonly buffer Out{float v[];}out_data;
+layout(push_constant) uniform P{uint unused;uint activation_scale_u32;uint u0;uint u1;}p;
+const uint TOPK=10u,DIM=2560u,EDIM=640u,GROUPS=10u,WORDS=6u,RECORD_WORDS=499712u,SLOT_OFFSET=26u,DOWN_S=1331200u,DOWN_W=1382400u;
+uint sb4(uint x){uint r=0u;for(uint i=0u;i<4u;++i){uint c=(x>>(i*3u))&7u;c|=(c&4u)*62u;r|=c<<(i*8u);}return r;}
+int d3(uint c,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sb4(c&4095u)))+dotPacked4x8EXT(int(a1),int(sb4(c>>12u)));}
+float bf(uint rb,uint i){uint h=(arena.v[rb+(DOWN_S>>2u)+(i>>1u)]>>((i&1u)*16u))&65535u;return uintBitsToFloat(h<<16u);}
+void main(){uint rank=gl_WorkGroupID.y;if(rank>=TOPK)return;uint rb=routes.v[SLOT_OFFSET+rank]*RECORD_WORDS,lane=gl_LocalInvocationID.x,frag=lane&1u,group=lane>>1u,first=gl_WorkGroupID.x*8u;float sum[8]=float[8](0,0,0,0,0,0,0,0);if(group<GROUPS){uint base0=rb+(DOWN_W>>2u)+frag*3u*GROUPS+group,w0,w1,w2,c0,c1,c2,c3,ab=rank*160u+group*16u+frag*8u;float as=uintBitsToFloat(act.v[p.activation_scale_u32+rank*5u+(group>>1u)]);for(uint r=0u;r<8u;++r){uint row=first+r;if(row<DIM){uint base=base0+row*(GROUPS*WORDS);w0=arena.v[base];w1=arena.v[base+GROUPS];w2=arena.v[base+2u*GROUPS];c0=w0&0xffffffu;c1=(w0>>24u)|((w1&0xffffu)<<8u);c2=(w1>>16u)|((w2&255u)<<16u);c3=w2>>8u;int s=d3(c0,act.v[ab],act.v[ab+1u])+d3(c1,act.v[ab+2u],act.v[ab+3u])+d3(c2,act.v[ab+4u],act.v[ab+5u])+d3(c3,act.v[ab+6u],act.v[ab+7u]);sum[r]+=float(s)*as*bf(rb,row*GROUPS+group);}}}for(uint r=0u;r<8u;++r)sum[r]=subgroupAdd(sum[r]);if(lane==0u){float rw=uintBitsToFloat(routes.v[16u+rank]);for(uint r=0u;r<8u;++r){uint row=first+r;if(row<DIM)out_data.v[rank*DIM+row]=sum[r]*rw;}}}

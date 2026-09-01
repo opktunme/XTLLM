@@ -1,0 +1,15 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Act{uint v[];}act;
+layout(set=0,binding=1,std430) readonly buffer Expert{uint v[];}ex;
+layout(set=0,binding=2,std430) readonly buffer Routes{uint v[];}routes;
+layout(set=0,binding=3,std430) writeonly buffer Out{float v[];}out_data;
+layout(push_constant) uniform P{uint rank;uint activation_scale_u32;uint u0;uint u1;}p;
+const uint EDIM=640u,GROUPS=40u,WORDS=6u,GATE_S=0u,GATE_W=51200u,UP_S=665600u,UP_W=716800u;
+uint sb4(uint x){uint r=0u;for(uint i=0u;i<4u;++i){uint c=(x>>(i*3u))&7u;c|=(c&4u)*62u;r|=c<<(i*8u);}return r;}
+int d3(uint c,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sb4(c&4095u)))+dotPacked4x8EXT(int(a1),int(sb4(c>>12u)));}
+float bf(uint off,uint i){uint h=(ex.v[(off>>2u)+(i>>1u)]>>((i&1u)*16u))&65535u;return uintBitsToFloat(h<<16u);}
+float dotrow(uint wb,uint sb,uint row,uint group,uint frag){uint base=(wb>>2u)+row*(GROUPS*WORDS)+frag*3u*GROUPS+group,w0=ex.v[base],w1=ex.v[base+GROUPS],w2=ex.v[base+2u*GROUPS],ab=group*16u+frag*8u;uint c0=w0&0xffffffu,c1=(w0>>24u)|((w1&0xffffu)<<8u),c2=(w1>>16u)|((w2&255u)<<16u),c3=w2>>8u;int s=d3(c0,act.v[ab],act.v[ab+1u])+d3(c1,act.v[ab+2u],act.v[ab+3u])+d3(c2,act.v[ab+4u],act.v[ab+5u])+d3(c3,act.v[ab+6u],act.v[ab+7u]);return float(s)*bf(sb,row*GROUPS+group)*uintBitsToFloat(act.v[p.activation_scale_u32+(group>>1u)]);}
+void main(){uint lane=gl_LocalInvocationID.x,frag=lane&1u,lg=lane>>1u,first=gl_WorkGroupID.x*8u;float g[8]=float[8](0,0,0,0,0,0,0,0),u[8]=float[8](0,0,0,0,0,0,0,0);for(uint group=lg;group<GROUPS;group+=32u)for(uint r=0u;r<8u;++r){uint row=first+r;if(row<EDIM){g[r]+=dotrow(GATE_W,GATE_S,row,group,frag);u[r]+=dotrow(UP_W,UP_S,row,group,frag);}}for(uint r=0u;r<8u;++r){g[r]=subgroupAdd(g[r]);u[r]=subgroupAdd(u[r]);}if(lane==0u)for(uint r=0u;r<8u;++r){uint row=first+r;if(row<EDIM){float x=g[r];out_data.v[p.rank*EDIM+row]=(x/(1.0+exp(-x)))*u[r];}}}

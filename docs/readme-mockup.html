@@ -19,7 +19,7 @@ table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid 
 <blockquote><b>Status:</b> Windows/RDNA2 research preview. Greedy text generation is working. Model weights are not included.</blockquote>
 <h2>Why this exists</h2>
 <div class="arch"><b>NVMe cold experts</b><span class="arrow">→</span><b>Budgeted RAM</b><span class="arrow">→</span><b>VRAM cache</b><span class="arrow">→</span><b>Finite Vulkan kernels</b><br><span class="small">BF16 host K/V supplies bounded long-context attention</span></div>
-<ul><li>One executable auto-detects four model families.</li><li>Live Vulkan memory-budget sizing selects a safe, model-specific cache.</li><li>Authoritative routing; no Q3, expert dropping, or TDR changes.</li></ul>
+<ul><li>One launcher dispatches model-specific native backends.</li><li>Live Vulkan memory-budget sizing selects a safe, model-specific cache.</li><li>Reference/full retain authoritative routes; fast tradeoffs are explicit and TDR is never changed.</li></ul>
 <h2>Measured performance</h2>
 <p>RX 6700 XT 12GB, Ryzen 5 3600, NVMe, Windows 10, greedy decode.</p>
 <table><thead><tr><th>Model</th><th>16 GiB</th><th>24 GiB</th><th>64 GiB</th></tr></thead><tbody>
@@ -49,5 +49,5 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
 .\xtllm.cmd chat qwen36</code></pre>
 <h2>Safety boundaries</h2><p>Finite submissions and I/O waits; no GPU busy-spin, unbounded shaders, hidden RAM tier, Q3 shortcut, router changes, or Windows TDR modifications.</p>
 </article>
-<aside class="card side"><h3>About</h3><p class="small">Huge MoE models. Consumer AMD GPUs. Honest memory budgets.</p><p><a href="#">Readme</a><br><a href="#">Apache-2.0 license</a><br><a href="#">Contributing</a></p><div><span class="tag">vulkan</span><span class="tag">amd-gpu</span><span class="tag">moe</span><span class="tag">llm-inference</span><span class="tag">long-context</span></div><div class="stats"><div><div class="num">4</div><div class="small">backends</div></div><div><div class="num">129</div><div class="small">shaders</div></div><div><div class="num">Q4</div><div class="small">quality</div></div><div><div class="num">1M</div><div class="small">tested context</div></div></div></aside>
+<aside class="card side"><h3>About</h3><p class="small">LongCat 20 tok/s. Qwen3.8 8.49 accepted tok/s. One RX 6700 XT.</p><p><a href="#">Readme</a><br><a href="#">Apache-2.0 license</a><br><a href="#">Contributing</a></p><div><span class="tag">vulkan</span><span class="tag">amd-gpu</span><span class="tag">moe</span><span class="tag">llm-inference</span><span class="tag">long-context</span></div><div class="stats"><div><div class="num">7</div><div class="small">backends</div></div><div><div class="num">129+</div><div class="small">shaders</div></div><div><div class="num">Q4</div><div class="small">quality</div></div><div><div class="num">1M</div><div class="small">tested context</div></div></div></aside>
 </main></body></html>

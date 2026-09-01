@@ -1,0 +1,42 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// One K64 group per Wave64 lane.  Relative to the retained two-lanes/group
+// kernel this loads each BF16 scale once, traverses K in fewer iterations, and
+// presents one contiguous transposed-weight word to the wave at a time.
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer A{uint v[];}a;
+layout(set=0,binding=1,std430) readonly buffer W{uint v[];}w;
+layout(set=0,binding=2,std430) readonly buffer S{uint v[];}s;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];}o;
+layout(push_constant) uniform P{uint rows;uint inner;uint ascale;uint outoff;}p;
+
+uint sn(uint n){uint b=(n&0x000fu)|((n&0x00f0u)<<4u)|((n&0x0f00u)<<8u)|((n&0xf000u)<<12u);uint z=b&0x08080808u;return b|(z<<1u)|(z<<2u)|(z<<3u)|(z<<4u);}
+int dq(uint x,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sn(x&65535u)))+dotPacked4x8EXT(int(a1),int(sn(x>>16u)));}
+float bf(uint i){uint x=s.v[i>>1u];return uintBitsToFloat(((x>>((i&1u)*16u))&65535u)<<16u);}
+
+void main(){
+    uint lane=gl_LocalInvocationID.x,first=gl_WorkGroupID.x*8u;
+    uint groups=(p.inner+63u)/64u,stride=(p.inner+3u)/4u;
+    float sum[8]=float[8](0,0,0,0,0,0,0,0);
+    for(uint g=lane;g<groups;g+=64u){
+        uint av=g*16u;
+        uint aa[16];
+        for(uint i=0u;i<16u;++i)aa[i]=(av+i<stride)?a.v[av+i]:0u;
+        float asc=uintBitsToFloat(a.v[p.ascale+(g>>1u)]);
+        for(uint r=0u;r<8u;++r){
+            uint row=first+r;
+            if(row<p.rows){
+                uint base=row*groups*8u+g;
+                int d=0;
+                for(uint j=0u;j<8u;++j)d+=dq(w.v[base+j*groups],aa[j*2u],aa[j*2u+1u]);
+                // Scales vary by row, so only the activation half is shared.
+                float ws=bf(row*groups+g);
+                sum[r]+=float(d)*asc*ws;
+            }
+        }
+    }
+    for(uint r=0u;r<8u;++r)sum[r]=subgroupAdd(sum[r]);
+    if(lane==0u)for(uint r=0u;r<8u;++r){uint row=first+r;if(row<p.rows)o.v[p.outoff+row]=sum[r];}
+}

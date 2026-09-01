@@ -9,6 +9,16 @@
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-22c55e">
 </p>
 
+## 20 tok/s LongCat and 8.49 accepted tok/s Qwen3.8 on an RX 6700 XT
+
+Fresh three-run averages from the merged Windows/Vulkan binaries reached
+**20.00 tok/s for LongCat Flash Lite Sparse** with all 12 routes and
+**8.49 accepted tok/s for Qwen3.8 Flash Next** with all 10 routes and strict
+MTP verification. LongCat's full profile trades 2.8 objective-quality points
+for its speedup in the deeper paired study; Qwen3.8 full tied its reference
+profile at 37/40. See [Measured performance](#measured-performance) for the
+reference paths, formats, memory use, methodology, and research-only profiles.
+
 XTLLM (eXpert-Tier LLM) is an experimental, text-only Vulkan inference engine for
 running very large mixture-of-experts models on consumer AMD GPUs. It keeps a
 model-specific working set in VRAM, a budgeted expert tier in system RAM, and
@@ -18,8 +28,9 @@ accounted host memory.
 It preserves the proven short-context backends and adds bounded long-context
 execution for Qwen3.5, DeepSeek V4, Qwen3.6, and Nemotron 3 Nano. The unified
 launcher also ships the retained model-specific Vulkan paths for Qwen3.8 Flash
-Next, Qwen3-Coder-Next, and LongCat Flash Lite Sparse. Model weights are
-**not** included.
+Next, Qwen3-Coder-Next, and LongCat Flash Lite Sparse, including their
+validated `reference`, `full`, and research-only `fast` profiles. Model
+weights are **not** included.
 
 > **Status:** Windows/RDNA2 research preview. Greedy text generation is working.
 > The source is intentionally shape-specialized and is not a general model loader.
@@ -41,7 +52,8 @@ flowchart LR
 - one executable auto-detects the converted model;
 - live Vulkan memory-budget sizing chooses a safe model-specific expert cache;
 - explicit `--ram-gib` and `--device-slots` overrides remain available;
-- authoritative routing is preserved—no expert dropping, rerouting, or Q3;
+- reference and full profiles preserve every authoritative route; reduced-route
+  fast profiles are explicit, warned, and never selected automatically;
 - all submissions are finite and bounded; XTLLM never changes Windows TDR.
 
 ## GPU compatibility
@@ -74,17 +86,20 @@ AMD, Radeon, and RDNA are trademarks of Advanced Micro Devices, Inc.
 | DeepSeek-V4-Flash-0731 | 284B | ~13B | 6 / 256 | Q4G64T experts/shared; Q8 global/router | ~141.2 GiB |
 | Qwen3.6-35B-A3B | ~35B | ~3B | 8 / 256 | Q4G64T; Q8 embed/head/router | 17.62 GiB |
 | NVIDIA Nemotron-3-Nano-30B-A3B | ~30B | ~3B | 6 / 128 | native E2M1 NVFP4/BF16-K16; Q8 global | 18.61 GiB |
-| Qwen3.8-Flash-Next-FP8 | ~125B | ~6B | 10 / 512 | Q4G64T experts/shared; Q8 global/router; official FP8 PLE | 110.54 GiB |
-| Qwen3-Coder-Next-FP8 | 79.67B | ~3.3B | 10 / 512 | Q4G64T experts/shared; Q8 embed/head/router | 39.73 GiB |
-| LongCat-Flash-Lite-Sparse | ~68.5B | ~3B | 12 / 256 physical + 128 identity | Q4G64T experts; Q8 shared; BF16 n-gram rows | 78.35 GiB |
+| Qwen3.8-Flash-Next-FP8 | ~125B | ~6B | 10 / 512 | Reference Q4 experts; full Q3 experts + strict MTP; official FP8 PLE | 110.54 / 157.3 GiB |
+| Qwen3-Coder-Next-FP8 | 79.67B | ~3.3B | 10 / 512 | Reference Q4 or full-route Q3 experts; Q4 shared; Q8 global | 39.73 / 69.1 GiB |
+| LongCat-Flash-Lite-Sparse | ~68.5B | ~3B | 12 / 256 physical + 128 identity | Q4 experts; reference Q8 shared or full selective-Q4 shared; BF16 n-gram rows | 78.35 / 80.7 GiB |
 
-Vision and draft/MTP namespaces are not executed in these text-only numbers.
+Vision namespaces are not executed. Qwen3.8 full/fast executes the checkpoint's
+text MTP block; the reference profile retains original greedy decoding.
 
 ## Measured performance
 
-RX 6700 XT 12GB, Ryzen 5 3600, NVMe SSD, Windows 10, greedy decode, Q4/NVFP4
-quality. Short-context figures use 23 timed token transitions and prewarmed
-budgeted caches. “System RAM” is a profile; the engine budget leaves OS headroom.
+RX 6700 XT 12GB, Ryzen 5 3600, NVMe SSD, Windows 10, and prewarmed budgeted
+caches. The base backends use Q4/NVFP4-class formats; the newer profile table
+explicitly labels its full-route Q3 expert paths. Short-context figures use 23
+timed token transitions. “System RAM” is a profile; the engine budget leaves OS
+headroom.
 
 | Model | 16 GiB system | 24 GiB system | 32 GiB system | 64 GiB system | Primary limit |
 |---|---:|---:|---:|---:|---|
@@ -93,22 +108,24 @@ budgeted caches. “System RAM” is a profile; the engine budget leaves OS head
 | Qwen3.5-122B-A10B | 3.35 tok/s | 3.96 tok/s | 4.38 tok/s | 4.77 tok/s | expert acquisition/traffic |
 | DeepSeek-V4-Flash-0731 | 1.99 tok/s | 2.60 tok/s | 2.77 tok/s | 2.70 tok/s | expert acquisition/traffic |
 
-The three newer backends were validated separately with 63 timed greedy token
-transitions. Their columns below are explicit model/expert RAM budgets rather
-than installed-system profiles, so they should not be mixed with the table
-above without preserving that distinction.
+The newer backends were subsequently evaluated as paired inference profiles.
+These are fixed-workload decode measurements, not installed-RAM projections:
 
-| Model | 16 GiB model RAM | 24 GiB model RAM | 32 GiB model RAM | Maximum retained profile | Peak VRAM | Primary limit |
-|---|---:|---:|---:|---:|---:|---|
-| Qwen3.8-Flash-Next-FP8 | — | — | — | **5.75 tok/s** at 53 GiB | 10.25 GiB | expert acquisition/H2D |
-| Qwen3-Coder-Next-FP8 | **8.61 tok/s** | **9.18 tok/s** | **9.85 tok/s** | **10.55 tok/s** at 38.27 GiB/all experts | 10.60 GiB | H2D/shared compute once resident |
-| LongCat-Flash-Lite-Sparse | **11.75–11.93 tok/s** | **12.42 tok/s** (all experts) | — | 24 GiB profile already holds all physical experts | 9.66 GiB | H2D/shared compute |
+| Model | Reference | Full (default) | Fast experiment | Quality conclusion |
+|---|---:|---:|---:|---|
+| Qwen3.8-Flash-Next-FP8 | 6.39 tok/s | **8.49 accepted tok/s** | 17.22 tok/s | Full tied reference at 37/40; fast fell to 9/40 strict |
+| Qwen3-Coder-Next-FP8 | 11.17 tok/s | **12.01 tok/s** | 23.17 tok/s | Full scored 19/20 vs 18/20 reference; fast was 0/20 strict |
+| LongCat-Flash-Lite-Sparse | 15.46 tok/s | **20.00 tok/s** | 22.78 tok/s | Deep test found full -2.8 points vs reference and fast -5.0 more vs full |
 
-Qwen3.8 was originally measured using the installed-system profiles above:
-4.75 tok/s at a 12 GiB model budget, 5.03 at 20 GiB, 4.97 at 28 GiB, and
-5.75 at 53 GiB. LongCat's faster all-Q4 shared-weight experiment was rejected
-because it produced incorrect repetitive text; the table reports only the
-coherent retained Q8-shared path.
+The reference/full values above are the final three-run averages from the
+merged release binaries. Qwen3.8 generated 127 timed transitions per run;
+LongCat generated 119. LongCat full was also run for a longer ten-run study
+after the host upgrade to 88 GB RAM: steady trials 2–10 averaged
+**21.28 tok/s** (median 21.29). It retained all 3,584 expert records in
+16.7344 GiB with zero expert SSD reads, so RAM beyond the 24 GiB model budget
+did not add decode speed. See
+[Validated inference profiles](docs/INFERENCE_PROFILES.md) for the paired
+quality data, confidence intervals, route counts, and exact profile meanings.
 
 ### Projected effect of more VRAM
 
@@ -196,9 +213,9 @@ expert conversion can be run again safely.
 | `nemotron` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4` | 40 GiB |
 | `qwen122` | `Qwen/Qwen3.5-122B-A10B` | 300 GiB |
 | `deepseek` | `deepseek-ai/DeepSeek-V4-Flash-0731` | 450 GiB |
-| `qwen38` | `Qwen/Qwen3.8-Flash-Next-FP8` | 290 GiB |
-| `qwencoder` | `Qwen/Qwen3-Coder-Next-FP8` | 120 GiB |
-| `longcat` | `meituan-longcat/LongCat-Flash-Lite-Sparse` | 214 GiB |
+| `qwen38` | `Qwen/Qwen3.8-Flash-Next-FP8` | 336 GiB for full; 290 GiB reference-only |
+| `qwencoder` | `Qwen/Qwen3-Coder-Next-FP8` | 149 GiB for full; 120 GiB reference-only |
+| `longcat` | `meituan-longcat/LongCat-Flash-Lite-Sparse` | 216 GiB for full; 214 GiB reference-only |
 
 Set `XTLLM_MODELS` once if you do not want to repeat `--model-root`:
 
@@ -228,6 +245,18 @@ use `plan` to inspect that decision without running inference:
 .\xtllm.cmd plan qwen36
 ```
 
+Qwen3.8, Qwen Coder Next, and LongCat default to their validated full profile.
+Use the same launcher to compare profiles:
+
+```powershell
+.\xtllm.cmd run qwen38 "Explain why the sky appears blue." --profile full
+.\xtllm.cmd run qwen38 "Explain why the sky appears blue." --profile reference
+.\xtllm.cmd plan longcat --profile fast
+```
+
+`fast` is opt-in and prints the measured quality warning. It is not a synonym
+for ordinary full-route inference.
+
 Advanced overrides such as `--ram-gib`, `--context-tokens`, and
 `--device-slots` are optional. A clean expert-cache allocation OOM gets one
 bounded retry at a smaller cache size.
@@ -244,7 +273,7 @@ $env:PATH = "C:\llvm-mingw\bin;$env:PATH"
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
-The auto-detecting engine, three shape-specialized native backends, and SPIR-V
+The auto-detecting engine, seven shape-specialized native backends, and SPIR-V
 shaders are written together under `build\`. The `xtllm` launcher chooses the
 correct binary internally; users still run the same `xtllm run MODEL` or
 `xtllm chat MODEL` command for every supported checkpoint.
@@ -261,6 +290,9 @@ and memory APIs. The exact dependencies and bounded porting checklist are in
 ## Memory and context controls
 
 ```text
+--profile reference  retained comparison implementation where available
+--profile full       validated optimized full-route implementation (default)
+--profile fast       warned research-only reduced/relaxed implementation
 --ram-gib N          expert/model host-memory budget
 --context-gib N      separately accounted host K/V budget
 --context-tokens N   exact context capacity (overrides context-gib sizing)
@@ -286,11 +318,13 @@ when a large maximum window is reserved.
 - **DeepSeek:** MLA/mHC and compressed history use a model-specific indexing
   path; the generic Qwen cache layout is not forced onto it.
 - **Qwen3.8 Flash Next:** four-stream gated residuals, hybrid DeltaNet/full
-  attention, Top-10/512 MoE, and bounded reads from the official FP8 PLE table.
+  attention, Top-10/512 MoE, bounded reads from the official FP8 PLE table,
+  additive Q3 expert containers, and strict MTP verification in full mode.
 - **Qwen3-Coder-Next:** its own 48-layer hybrid layout and Top-10/512 expert
-  cache, converted from the official FP8 checkpoint into the retained Q4 path.
+  cache, with retained Q4 reference and full-route Q3 expert paths.
 - **LongCat Flash Lite Sparse:** dual attention/dense sublayers, MLA, physical
-  and identity experts, and the checkpoint's BF16 n-gram embedding tables.
+  and identity experts, the checkpoint's BF16 n-gram embedding tables, and a
+  side-by-side selective-Q4 full container that leaves the Q8 reference intact.
 - **Experts:** RAM and VRAM policies stay model-specific. A single generic cache
   policy was deliberately rejected because it regressed proven paths.
 
@@ -301,7 +335,8 @@ when a large maximum window is reserved.
 - finite command-buffer rings and finite I/O waits;
 - no TDR registry changes;
 - no hidden filesystem cache as a claimed inference tier in budgeted modes;
-- no Q3, expert dropping, substitution, pruning, or changed router decisions.
+- no hidden expert substitution, pruning, or changed router decisions in
+  reference/full; reduced-route fast modes are explicit and warned.
 
 ## 70B MoE projection
 

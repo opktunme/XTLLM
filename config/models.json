@@ -12,11 +12,73 @@
       "runtime_gib": 110.6,
       "scratch_gib": 6.0,
       "backend": "xtllm-qwen38-flash-next.exe",
+      "default_profile": "full",
+      "profiles": {
+        "reference": {
+          "label": "Q4 exact reference (10/10 routes)",
+          "backend": "xtllm-qwen38-flash-next.exe",
+          "runtime_gib": 110.6,
+          "default_ram_gib": 53.0,
+          "default_slots": 60,
+          "measured_tok_s": 6.39
+        },
+        "full": {
+          "label": "Q3 full route + strict MTP verification (10/10 routes)",
+          "backend": "xtllm-qwen38-flash-next-mtp.exe",
+          "runtime_gib": 157.3,
+          "default_ram_gib": 47.0,
+          "default_slots": 72,
+          "measured_tok_s": 8.49,
+          "required": [
+            {"path": "experts-q3g64.ovx", "min_bytes": 49123692544},
+            {"path": "mtp-q4g64.ovs", "min_bytes": 48029696},
+            {"path": "mtp-experts-q3g64.ovx", "min_bytes": 1023414272}
+          ],
+          "env": {
+            "QWEN38_Q4_ONE_LANE": "1",
+            "QWEN38_MTP_SLOTS": "16",
+            "QWEN38_VERIFY4_EXPERIMENT": "1",
+            "QWEN38_VERIFY4_BATCH_Q4": "1",
+            "QWEN38_VERIFY4_ACTIVE_TOPK": "10",
+            "QWEN38_MTP_ACTIVE_TOPK": "10",
+            "QWEN38_PARALLEL_HOST_COPY": "1",
+            "QWEN38_COPY_WORKERS": "3"
+          }
+        },
+        "fast": {
+          "label": "Q3 relaxed MTP experiment (7/10 verifier routes)",
+          "backend": "xtllm-qwen38-flash-next-mtp.exe",
+          "runtime_gib": 157.3,
+          "default_ram_gib": 47.0,
+          "default_slots": 72,
+          "measured_tok_s": 17.22,
+          "warning": "Quality-rejected research profile: 9/40 strict and 17/40 lenient versus 37/40 full; it also ended the fixed speed task early.",
+          "required": [
+            {"path": "experts-q3g64.ovx", "min_bytes": 49123692544},
+            {"path": "mtp-q4g64.ovs", "min_bytes": 48029696},
+            {"path": "mtp-experts-q3g64.ovx", "min_bytes": 1023414272}
+          ],
+          "env": {
+            "QWEN38_Q4_ONE_LANE": "1",
+            "QWEN38_MTP_SLOTS": "16",
+            "QWEN38_VERIFY4_EXPERIMENT": "1",
+            "QWEN38_VERIFY4_BATCH_Q4": "1",
+            "QWEN38_VERIFY4_ACTIVE_TOPK": "7",
+            "QWEN38_MTP_ACTIVE_TOPK": "10",
+            "QWEN38_RELAXED_DRAFTS": "3",
+            "QWEN38_RELAXED_REPEAT_GUARD": "1",
+            "QWEN38_RELAXED_MISMATCH_BUDGET": "2",
+            "QWEN38_PARALLEL_HOST_COPY": "1",
+            "QWEN38_COPY_WORKERS": "3"
+          }
+        }
+      },
       "standalone": {
         "ram_env": "QWEN38_RAM_GIB",
         "slots_env": "QWEN38_DEVICE_SLOTS_PER_LAYER",
         "prewarm_env": "QWEN38_FILL_RAM_CACHE",
         "no_think_env": "QWEN38_NO_THINK",
+        "clear_env_prefixes": ["QWEN38_"],
         "default_ram_gib": 24.0,
         "default_slots": 60
       },
@@ -30,6 +92,18 @@
         {
           "script": "convert_qwen38.py",
           "when_missing": ["model-q4g64.ovs", "experts-q4g64.ovx", "ple-fp8.ovp", "tokenizer.ovb"],
+          "args": ["--source", "{checkpoint}", "--output", "{runtime}"]
+        },
+        {
+          "script": "convert_qwen38_experts_q3.py",
+          "profiles": ["full", "fast"],
+          "when_missing": ["experts-q3g64.ovx"],
+          "args": ["--source", "{runtime}/experts-q4g64.ovx", "--output", "{runtime}/experts-q3g64.ovx"]
+        },
+        {
+          "script": "convert_qwen38_mtp.py",
+          "profiles": ["full", "fast"],
+          "when_missing": ["mtp-q4g64.ovs", "mtp-experts-q3g64.ovx"],
           "args": ["--source", "{checkpoint}", "--output", "{runtime}"]
         }
       ]
@@ -45,11 +119,48 @@
       "runtime_gib": 39.8,
       "scratch_gib": 5.0,
       "backend": "xtllm-qwen3-coder-next.exe",
+      "default_profile": "full",
+      "profiles": {
+        "reference": {
+          "label": "Q4 exact reference (10/10 routes)",
+          "backend": "xtllm-qwen3-coder-next.exe",
+          "runtime_gib": 39.8,
+          "default_ram_gib": 39.0,
+          "default_slots": 120,
+          "measured_tok_s": 11.17
+        },
+        "full": {
+          "label": "Q3 full route (10/10 routes)",
+          "backend": "xtllm-qwen3-coder-next-q3.exe",
+          "runtime_gib": 69.1,
+          "default_ram_gib": 31.0,
+          "default_slots": 152,
+          "measured_tok_s": 12.01,
+          "required": [
+            {"path": "experts-q3g64.ovx", "min_bytes": 31406952448}
+          ],
+          "env": {"QWEN_ACTIVE_TOPK": "10"}
+        },
+        "fast": {
+          "label": "Q3 reduced route experiment (5/10 routes)",
+          "backend": "xtllm-qwen3-coder-next-q3.exe",
+          "runtime_gib": 69.1,
+          "default_ram_gib": 31.0,
+          "default_slots": 152,
+          "measured_tok_s": 23.17,
+          "warning": "Quality-rejected research profile: 0/20 strict and 13/20 lenient versus 19/20 full.",
+          "required": [
+            {"path": "experts-q3g64.ovx", "min_bytes": 31406952448}
+          ],
+          "env": {"QWEN_ACTIVE_TOPK": "5"}
+        }
+      },
       "standalone": {
         "ram_env": "QWEN_RAM_GIB",
         "slots_env": "QWEN_DEVICE_SLOTS_PER_LAYER",
         "prewarm_env": "QWEN_FILL_RAM_CACHE",
         "no_think_env": "QWEN_NO_THINK",
+        "clear_env_prefixes": ["QWEN_"],
         "default_ram_gib": 24.0,
         "default_slots": 120
       },
@@ -63,6 +174,12 @@
           "script": "convert_qwen3_coder_next.py",
           "when_missing": ["model-q4g64.ovs", "experts-q4g64.ovx", "tokenizer.ovb"],
           "args": ["--source", "{checkpoint}", "--output", "{runtime}"]
+        },
+        {
+          "script": "convert_qwen3_coder_next_experts_q3.py",
+          "profiles": ["full", "fast"],
+          "when_missing": ["experts-q3g64.ovx"],
+          "args": ["--source", "{runtime}/experts-q4g64.ovx", "--output", "{runtime}/experts-q3g64.ovx"]
         }
       ]
     },
@@ -77,10 +194,56 @@
       "runtime_gib": 78.4,
       "scratch_gib": 6.0,
       "backend": "xtllm-longcat-flash-lite.exe",
+      "default_profile": "full",
+      "profiles": {
+        "reference": {
+          "label": "Q8-shared exact reference (12/12 routes)",
+          "backend": "xtllm-longcat-flash-lite.exe",
+          "runtime_gib": 78.4,
+          "default_ram_gib": 24.0,
+          "default_slots": 96,
+          "measured_tok_s": 15.46,
+          "env": {"LONGCAT_ACTIVE_TOPK": "12"}
+        },
+        "full": {
+          "label": "Selective-Q4 full route (12/12 routes)",
+          "backend": "xtllm-longcat-flash-lite-hybrid.exe",
+          "runtime_gib": 80.7,
+          "default_ram_gib": 24.0,
+          "default_slots": 120,
+          "measured_tok_s": 20.00,
+          "required": [
+            {"path": "model-hybrid-q4g64.ovs", "min_bytes": 2428166144}
+          ],
+          "env": {
+            "LONGCAT_SHARED_MODEL": "model-hybrid-q4g64.ovs",
+            "LONGCAT_ACTIVE_TOPK": "12",
+            "LONGCAT_Q4_ONE_LANE": "1"
+          }
+        },
+        "fast": {
+          "label": "Selective-Q4 reduced route experiment (7/12 routes)",
+          "backend": "xtllm-longcat-flash-lite-hybrid.exe",
+          "runtime_gib": 80.7,
+          "default_ram_gib": 24.0,
+          "default_slots": 120,
+          "measured_tok_s": 22.78,
+          "warning": "Quality-reduced research profile: the 1,000-question deep test lost 5.0 percentage points versus full (95% CI -7.9 to -2.2).",
+          "required": [
+            {"path": "model-hybrid-q4g64.ovs", "min_bytes": 2428166144}
+          ],
+          "env": {
+            "LONGCAT_SHARED_MODEL": "model-hybrid-q4g64.ovs",
+            "LONGCAT_ACTIVE_TOPK": "7",
+            "LONGCAT_Q4_ONE_LANE": "1"
+          }
+        }
+      },
       "standalone": {
         "ram_env": "LONGCAT_RAM_GIB",
         "slots_env": "LONGCAT_DEVICE_SLOTS_PER_LAYER",
         "prewarm_env": "LONGCAT_FILL_RAM_CACHE",
+        "clear_env_prefixes": ["LONGCAT_"],
         "default_ram_gib": 24.0,
         "default_slots": 96
       },
@@ -95,6 +258,12 @@
           "script": "convert_longcat_flash_lite.py",
           "when_missing": ["model-q4g64.ovs", "experts-q4g64.ovx", "ngram-bf16.ove", "tokenizer.ovb"],
           "args": ["--source", "{checkpoint}", "--output", "{runtime}", "--q8-shared"]
+        },
+        {
+          "script": "convert_longcat_shared_hybrid.py",
+          "profiles": ["full", "fast"],
+          "when_missing": ["model-hybrid-q4g64.ovs"],
+          "args": ["--source", "{checkpoint}", "--output", "{runtime}", "--filename", "model-hybrid-q4g64.ovs", "--attention-output-q4"]
         }
       ]
     },

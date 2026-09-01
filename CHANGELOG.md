@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added named `reference`, `full`, and warned research-only `fast`
+  inference profiles for Qwen3.8 Flash Next, Qwen3-Coder-Next, and LongCat.
+- Integrated Qwen3.8 Q3 experts and strict MTP verification, Qwen Coder Next
+  Q3 experts, and LongCat's side-by-side selective-Q4 shared container without
+  overwriting the retained reference runtimes.
+- Added profile-aware resumable conversion, seven specialized Windows
+  executables, the optimized shader set, release packaging, and CLI dispatch.
+- Published paired quality/speed results, including the 1,000-question LongCat
+  deep evaluation and the fresh 88 GB host-RAM speed rerun. Full is the default;
+  quality-rejected fast paths remain explicit opt-in experiments.
+- Revalidated the merged release binaries over three clean runs: LongCat full
+  averaged 20.00 tok/s with 12/12 routes, while Qwen3.8 full averaged 8.49
+  accepted tok/s with 10/10 routes and strict MTP verification.
+
 ## 0.3.0 — 2026-08-28
 
 - Added revision-pinned download, conversion, native Vulkan inference, and

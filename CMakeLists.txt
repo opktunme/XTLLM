@@ -51,6 +51,18 @@ endfunction()
 # units so consolidation cannot flatten their proven cache/kernel policies.
 xtllm_native_backend(xtllm src/ovllm_longctx.cpp)
 xtllm_native_backend(xtllm-qwen38-flash-next src/qwen38_flash_next.cpp)
+xtllm_native_backend(xtllm-qwen38-flash-next-q3 src/qwen38_flash_next.cpp)
+target_compile_definitions(xtllm-qwen38-flash-next-q3 PRIVATE
+  OVLLM_QWEN38_Q3_EXPERTS)
+xtllm_native_backend(xtllm-qwen38-flash-next-mtp src/qwen38_mtp.cpp)
+target_compile_definitions(xtllm-qwen38-flash-next-mtp PRIVATE
+  OVLLM_QWEN38_Q3_EXPERTS)
 xtllm_native_backend(xtllm-qwen3-coder-next src/m16_qwen35.cpp)
 target_compile_definitions(xtllm-qwen3-coder-next PRIVATE XTLLM_QWEN3_CODER_NEXT)
+xtllm_native_backend(xtllm-qwen3-coder-next-q3 src/m16_qwen35.cpp)
+target_compile_definitions(xtllm-qwen3-coder-next-q3 PRIVATE
+  XTLLM_QWEN3_CODER_NEXT XTLLM_QWEN3_CODER_NEXT_Q3)
 xtllm_native_backend(xtllm-longcat-flash-lite src/longcat_flash_lite.cpp)
+xtllm_native_backend(xtllm-longcat-flash-lite-hybrid src/longcat_flash_lite.cpp)
+target_compile_definitions(xtllm-longcat-flash-lite-hybrid PRIVATE
+  XTLLM_LONGCAT_DENSE_OUT_Q4)

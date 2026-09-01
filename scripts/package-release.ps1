@@ -34,8 +34,12 @@ if (-not (Test-Path -LiteralPath $Engine)) { throw 'Built XTLLM executable was n
 Copy-Item -LiteralPath $Engine -Destination (Join-Path $Stage 'xtllm.exe')
 $SpecializedBackends = @(
     'xtllm-qwen38-flash-next.exe',
+    'xtllm-qwen38-flash-next-q3.exe',
+    'xtllm-qwen38-flash-next-mtp.exe',
     'xtllm-qwen3-coder-next.exe',
-    'xtllm-longcat-flash-lite.exe'
+    'xtllm-qwen3-coder-next-q3.exe',
+    'xtllm-longcat-flash-lite.exe',
+    'xtllm-longcat-flash-lite-hybrid.exe'
 )
 foreach ($Backend in $SpecializedBackends) {
     $BackendPath = Join-Path $Build $Backend

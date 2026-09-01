@@ -81,11 +81,28 @@ constexpr uint32_t kLinearValue = 4096;
 constexpr uint32_t kLinearAb = 64;
 constexpr uint32_t kFullQProj = 8192;
 constexpr uint32_t kDeltaParams = 192;
+#ifdef XTLLM_QWEN3_CODER_NEXT_Q3
+constexpr uint32_t kMaximumDeviceSlots = 160;
+#else
 constexpr uint32_t kMaximumDeviceSlots = 128;
+#endif
 constexpr uint32_t kConvWidth = 4;
 constexpr uint32_t kMaximumContext = 2048;
 
 constexpr uint64_t kHeaderBytes = 4096;
+#ifdef XTLLM_QWEN3_CODER_NEXT_Q3
+constexpr uint64_t kGateScale = 0;
+constexpr uint64_t kGateWeight = 32768;
+constexpr uint64_t kUpScale = 425984;
+constexpr uint64_t kUpWeight = 458752;
+constexpr uint64_t kDownScale = 851968;
+constexpr uint64_t kDownWeight = 884736;
+constexpr uint64_t kExpertRecordBytes = 1277952;
+// The shared/dense container remains the original Q4 build.  Its header
+// records the companion Q4 expert stride even when this executable reads a
+// separately converted Q3 expert container.
+constexpr uint64_t kSharedContainerExpertRecordBytes = 1671168;
+#else
 constexpr uint64_t kGateScale = 0;
 constexpr uint64_t kGateWeight = 32768;
 constexpr uint64_t kUpScale = 557056;
@@ -93,6 +110,8 @@ constexpr uint64_t kUpWeight = 589824;
 constexpr uint64_t kDownScale = 1114112;
 constexpr uint64_t kDownWeight = 1146880;
 constexpr uint64_t kExpertRecordBytes = 1671168;
+constexpr uint64_t kSharedContainerExpertRecordBytes = kExpertRecordBytes;
+#endif
 static_assert(kExpertRecordBytes % 4096 == 0);
 
 constexpr uint32_t kEndOfText = 151643;
@@ -142,6 +161,10 @@ constexpr uint32_t kImStart = 248045;
 constexpr uint32_t kImEnd = 248046;
 constexpr uint32_t kThink = 248068;
 constexpr uint32_t kEndThink = 248069;
+#endif
+
+#if !defined(XTLLM_QWEN3_CODER_NEXT)
+constexpr uint64_t kSharedContainerExpertRecordBytes = kExpertRecordBytes;
 #endif
 
 using dsv4::ExpertHeader;
@@ -199,7 +222,7 @@ public:
             header_.kv_heads != kKvHeads || header_.head_dimension != kHeadDim ||
             header_.vocabulary != kVocabulary || header_.experts != kExperts ||
             header_.top_k != kTopK ||
-            header_.expert_record_bytes != kExpertRecordBytes)
+            header_.expert_record_bytes != kSharedContainerExpertRecordBytes)
             throw std::runtime_error("Unsupported Qwen3.5 shared container");
         const uint64_t actual = std::filesystem::file_size(path);
         if (header_.file_bytes != actual ||
@@ -624,7 +647,9 @@ public:
 
     explicit ExpertFile(const std::filesystem::path& path) : path_(path) {
         std::ifstream input(path, std::ios::binary);
-        if (!input) throw std::runtime_error("Could not open Qwen expert container");
+        if (!input)
+            throw std::runtime_error("Could not open Qwen expert container: " +
+                                     path.string());
         read_at(input, 0, &header_, sizeof(header_), "expert header");
 #ifdef XTLLM_LONGCAT
         if (std::memcmp(header_.magic, "OLCFEXP\0", 8) != 0 ||
@@ -1298,12 +1323,15 @@ public:
     };
 
     Selection resolve(uint32_t layer_index,
-                      const std::array<uint32_t, kTopK>& experts) {
+                      const std::array<uint32_t, kTopK>& experts,
+                      uint32_t active_topk = kTopK) {
+        if (active_topk == 0 || active_topk > kTopK)
+            throw std::runtime_error("Invalid active Qwen route count");
         Layer& layer = layers_.at(layer_index);
         const uint32_t capacity = capacities_.at(layer_index);
         Selection result{};
         std::vector<bool> reserved(capacity);
-        for (uint32_t rank = 0; rank < kTopK; ++rank) {
+        for (uint32_t rank = 0; rank < active_topk; ++rank) {
             ++layer.frequency[experts[rank]];
             result.slots[rank] = UINT32_MAX;
             for (uint32_t slot = 0; slot < capacity; ++slot) {
@@ -1316,7 +1344,7 @@ public:
                 }
             }
         }
-        for (uint32_t rank = 0; rank < kTopK; ++rank) {
+        for (uint32_t rank = 0; rank < active_topk; ++rank) {
             if (result.slots[rank] != UINT32_MAX) continue;
             ++misses_;
             uint32_t victim = UINT32_MAX;
@@ -1454,7 +1482,7 @@ private:
 };
 
 struct Pipelines {
-    VkPipeline embedding{}, rms{}, quant{}, q4{}, q4_residual{}, q8{};
+    VkPipeline embedding{}, rms{}, quant{}, q4{}, q4_one{}, q4_residual{}, q8{};
     VkPipeline swiglu{}, router{}, expert_gate{}, expert_down{}, reduce{};
     VkPipeline expert_gate_batch{}, expert_down_batch{};
     VkPipeline qk{}, store_value{}, attention{}, head_gate{};
@@ -1476,17 +1504,27 @@ public:
             return dsv4::create_dsv4_pipeline(
                 runtime_, resources_, directory / (std::string(name) + ".comp.spv"), 64);
         };
+        const auto load32 = [&](const char* name) {
+            return dsv4::create_dsv4_pipeline(
+                runtime_, resources_, directory / (std::string(name) + ".comp.spv"), 32);
+        };
         pipelines_.embedding = load("dsv4_embedding");
         pipelines_.rms = load("step37_rmsnorm");
         pipelines_.quant = load("dsv4_quantize_q8");
         pipelines_.q4 = load("dsv4_q4g64t_gemv");
+        pipelines_.q4_one = load("dsv4_q4g64t_gemv_one_lane");
         pipelines_.q4_residual = load("dsv4_q4g64t_gemv_residual");
         pipelines_.q8 = load("dsv4_q8_gemv");
         pipelines_.swiglu = load("step37_swiglu");
 #ifdef XTLLM_QWEN3_CODER_NEXT
         pipelines_.router = load("qwen_next_router_top10");
+#ifdef XTLLM_QWEN3_CODER_NEXT_Q3
+        pipelines_.expert_gate = load("qwen_next_expert_gate_up_q3");
+        pipelines_.expert_down = load32("qwen_next_expert_down_q3");
+#else
         pipelines_.expert_gate = load("qwen_next_expert_gate_up_q4");
         pipelines_.expert_down = load("qwen_next_expert_down_q4");
+#endif
 #else
         pipelines_.router = load("qwen35_router_top8");
         pipelines_.expert_gate = load("qwen35_expert_gate_up_q4");
@@ -1586,6 +1624,17 @@ public:
             std::getenv("QWEN_PROGRESSIVE_EXPERTS") != nullptr;
         verify2_enabled_ = std::getenv("QWEN_VERIFY2_EXPERIMENT") != nullptr;
         tensor_split_ = std::getenv("QWEN_TENSOR_SPLIT_EXPERIMENT") != nullptr;
+        q4_one_lane_ = std::getenv("QWEN_Q4_ONE_LANE") != nullptr;
+        if (const char* text = std::getenv("QWEN_ACTIVE_TOPK")) {
+            active_topk_ = static_cast<uint32_t>(std::stoul(text));
+            if (active_topk_ == 0 || active_topk_ > kTopK)
+                throw std::runtime_error(
+                    "QWEN_ACTIVE_TOPK must be between 1 and the model Top-K");
+        }
+        if (active_topk_ != kTopK &&
+            (progressive_experts_ || verify2_enabled_ || tensor_split_))
+            throw std::runtime_error(
+                "Reduced Qwen routes require the ordinary finite-queue path");
         if (progressive_experts_)
             progressive_compute_ = std::make_unique<
                 dsv4::experiment::FiniteQueueRing<12>>(
@@ -1678,6 +1727,7 @@ public:
     }
     uint32_t host_slots() const { return host_cache_.capacity(); }
     uint32_t device_slots() const { return device_cache_.slots(); }
+    uint32_t active_topk() const { return active_topk_; }
     uint32_t device_total_slots() const { return device_cache_.total_slots(); }
     uint32_t device_minimum_slots() const { return device_cache_.minimum_slots(); }
     uint32_t device_maximum_slots() const { return device_cache_.maximum_slots(); }
@@ -1963,6 +2013,11 @@ private:
     static bool full_attention(uint32_t layer) { return layer % 4u == 3u; }
     static uint32_t full_index(uint32_t layer) { return layer / 4u; }
     static uint32_t linear_index(uint32_t layer) { return layer - layer / 4u; }
+
+    VkPipeline q4_pipeline(uint32_t inner) const {
+        return q4_one_lane_ && inner > kMoeDim
+            ? kernels_.p().q4_one : kernels_.p().q4;
+    }
 
     Buffer device(uint64_t bytes) {
         Buffer buffer = create_device_buffer(runtime_, bytes);
@@ -2318,7 +2373,7 @@ private:
             });
             started = std::chrono::steady_clock::now();
             const DeviceExpertCache::Selection selection =
-                device_cache_.resolve(layer, experts);
+                device_cache_.resolve(layer, experts, active_topk_);
             selected_slots_ = selection.slots;
             std::array<void*, kTopK> direct_destinations{};
             for (uint32_t rank = 0; rank < kTopK; ++rank)
@@ -2654,11 +2709,11 @@ private:
 
         if (full_attention(layer)) {
             push = {kFullQProj, kDim, kDim / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q4, sets.qgate, &push,
+            kernels_.dispatch(command, q4_pipeline(push.b), sets.qgate, &push,
                               kFullQProj / 8);
             push = {512, kDim, kDim / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q4, sets.key, &push, 64);
-            kernels_.dispatch(command, kernels_.p().q4, sets.value, &push, 64);
+            kernels_.dispatch(command, q4_pipeline(push.b), sets.key, &push, 64);
+            kernels_.dispatch(command, q4_pipeline(push.b), sets.value, &push, 64);
             compute_barrier(command);
             push = {full_index(layer), position, kAttentionHeads, kRopeDim / 2};
             kernels_.dispatch(command, kernels_.p().qk, sets.qk, &push,
@@ -2685,13 +2740,13 @@ private:
                               sets.attention_out, &push, kDim / 8);
         } else {
             push = {kLinearQkv, kDim, kDim / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q4, sets.gdn_qkv, &push,
+            kernels_.dispatch(command, q4_pipeline(push.b), sets.gdn_qkv, &push,
                               kLinearQkv / 8);
             push = {kLinearValue, kDim, kDim / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q4, sets.gdn_z, &push,
+            kernels_.dispatch(command, q4_pipeline(push.b), sets.gdn_z, &push,
                               kLinearValue / 8);
             push = {kLinearAb, kDim, kDim / 4, 0};
-            kernels_.dispatch(command, kernels_.p().q4, sets.ab, &push,
+            kernels_.dispatch(command, q4_pipeline(push.b), sets.ab, &push,
                               kLinearAb / 8);
             compute_barrier(command);
             push = {kLinearQkv, kConvWidth, 0, 0};
@@ -2753,7 +2808,7 @@ private:
         kernels_.dispatch(command, kernels_.p().q8, sets.router_gemv, &push,
                           kExperts / 8);
         compute_barrier(command);
-        push = {kExperts, kTopK, 0, 0};
+        push = {kExperts, active_topk_, 0, 0};
         kernels_.dispatch(command, kernels_.p().router, sets.router, &push, 1);
         compute_barrier(command);
     }
@@ -2761,12 +2816,12 @@ private:
     void record_shared(VkCommandBuffer command, uint32_t layer) {
         LayerSets& sets = layers_[layer];
         Push push{kMoeDim, kDim, kDim / 4, 0};
-        kernels_.dispatch(command, kernels_.p().q4, sets.shared_gate, &push,
+        kernels_.dispatch(command, q4_pipeline(push.b), sets.shared_gate, &push,
                           kMoeDim / 8);
-        kernels_.dispatch(command, kernels_.p().q4, sets.shared_up, &push,
+        kernels_.dispatch(command, q4_pipeline(push.b), sets.shared_up, &push,
                           kMoeDim / 8);
         push = {1, kDim, kDim / 4, 0};
-        kernels_.dispatch(command, kernels_.p().q4, sets.shared_expert_gate,
+        kernels_.dispatch(command, q4_pipeline(push.b), sets.shared_expert_gate,
                           &push, 1);
         compute_barrier(command);
         push = {kMoeDim, float_bits(3.402823466e+38f), 0, 0};
@@ -2778,7 +2833,7 @@ private:
                           kMoeDim / 128);
         compute_barrier(command);
         push = {kDim, kMoeDim, kMoeDim / 4, 0};
-        kernels_.dispatch(command, kernels_.p().q4, sets.shared_down, &push,
+        kernels_.dispatch(command, q4_pipeline(push.b), sets.shared_down, &push,
                           kDim / 8);
         compute_barrier(command);
     }
@@ -2787,7 +2842,7 @@ private:
         LayerSets& sets = layers_[layer];
         if (batch_experts_) {
             auto* words = static_cast<uint32_t*>(routing_.mapped);
-            for (uint32_t rank = 0; rank < kTopK; ++rank) {
+            for (uint32_t rank = 0; rank < active_topk_; ++rank) {
                 const DescriptorRange record =
                     device_cache_.record(layer, selected_slots_[rank]);
                 VkBufferDeviceAddressInfo info{
@@ -2805,9 +2860,9 @@ private:
             Push push{0, kDim / 4, 0, 0};
             kernels_.dispatch(command, kernels_.p().expert_gate_batch,
                               expert_gate_batch_set_, &push,
-                              kMoeDim / 8, kTopK);
+                              kMoeDim / 8, active_topk_);
         } else {
-            for (uint32_t rank = 0; rank < kTopK; ++rank) {
+            for (uint32_t rank = 0; rank < active_topk_; ++rank) {
                 Push push{rank, kDim / 4, 0, 0};
                 kernels_.dispatch(command, kernels_.p().expert_gate,
                                   sets.expert_gate[selected_slots_[rank]], &push,
@@ -2815,26 +2870,27 @@ private:
             }
         }
         compute_barrier(command);
-        Push push{kTopK * kMoeDim, 128, kTopK * kMoeDim / 4,
-                  kTopK * kMoeDim / 4};
+        Push push{active_topk_ * kMoeDim, 128,
+                  active_topk_ * kMoeDim / 4,
+                  active_topk_ * kMoeDim / 4};
         kernels_.dispatch(command, kernels_.p().quant, expert_quant_set_, &push,
-                          kTopK * kMoeDim / 128);
+                          active_topk_ * kMoeDim / 128);
         compute_barrier(command);
         if (batch_experts_) {
-            push = {0, kTopK * kMoeDim / 4, 0, 0};
+            push = {0, active_topk_ * kMoeDim / 4, 0, 0};
             kernels_.dispatch(command, kernels_.p().expert_down_batch,
                               expert_down_batch_set_, &push,
-                              kDim / 8, kTopK);
+                              kDim / 8, active_topk_);
         } else {
-            for (uint32_t rank = 0; rank < kTopK; ++rank) {
-                push = {rank, kTopK * kMoeDim / 4, 0, 0};
+            for (uint32_t rank = 0; rank < active_topk_; ++rank) {
+                push = {rank, active_topk_ * kMoeDim / 4, 0, 0};
                 kernels_.dispatch(command, kernels_.p().expert_down,
                                   sets.expert_down[selected_slots_[rank]], &push,
                                   kDim / 8);
             }
         }
         compute_barrier(command);
-        push = {kDim, kTopK, 0, 0};
+        push = {kDim, active_topk_, 0, 0};
         kernels_.dispatch(command, kernels_.p().reduce, reduce_set_, &push,
                           kDim / 64);
         compute_barrier(command);
@@ -2878,7 +2934,7 @@ private:
     }
 
     void record_expert_finish(VkCommandBuffer command) {
-        const Push push{kDim, kTopK, 0, 0};
+        const Push push{kDim, active_topk_, 0, 0};
         kernels_.dispatch(command, kernels_.p().reduce, reduce_set_, &push,
                           kDim / 64);
         compute_barrier(command);
@@ -2937,6 +2993,8 @@ private:
     bool progressive_experts_ = false;
     bool verify2_enabled_ = false;
     bool tensor_split_ = false;
+    bool q4_one_lane_ = false;
+    uint32_t active_topk_ = kTopK;
     std::unique_ptr<dsv4::experiment::FiniteQueueRing<12>> progressive_compute_;
     ovllm_trace::Writer expert_trace_;
     uint64_t activation_device_bytes_ = 0;
@@ -2967,7 +3025,7 @@ static uint32_t device_slots() {
 #ifdef XTLLM_LONGCAT
         80u;
 #elif defined(XTLLM_QWEN3_CODER_NEXT)
-        120u;
+        96u;
 #else
         17u;
 #endif
@@ -3000,7 +3058,13 @@ int qwen35_cli_main(int argc, char** argv) {
             return 0;
         }
         qwen35::SharedIndex index(directory / "model-q4g64.ovs");
-        qwen35::ExpertFile inspect_experts(directory / "experts-q4g64.ovx");
+        const std::filesystem::path expert_path = directory /
+#ifdef XTLLM_QWEN3_CODER_NEXT_Q3
+            "experts-q3g64.ovx";
+#else
+            "experts-q4g64.ovx";
+#endif
+        qwen35::ExpertFile inspect_experts(expert_path);
         if (std::strcmp(argv[2], "--inspect") == 0) {
 #ifdef XTLLM_QWEN3_CODER_NEXT
             std::cout << "Qwen3-Coder-Next-FP8 derived Q4 runtime containers validated\n";
@@ -3030,10 +3094,17 @@ int qwen35_cli_main(int argc, char** argv) {
         uint32_t host_slots = 0;
         {
             qwen35::QwenEngine engine(
-                runtime, index, directory / "experts-q4g64.ovx",
+                runtime, index, expert_path,
                 std::filesystem::absolute(argv[0]).parent_path(), budget, slots);
-            std::cout << "precision: Q4G64T experts/shared/dense, "
+            std::cout << "precision: "
+#ifdef XTLLM_QWEN3_CODER_NEXT_Q3
+                         "Q3G64 experts, Q4G64T shared/dense, "
+#else
+                         "Q4G64T experts/shared/dense, "
+#endif
                          "Q8 embedding/head/router\n"
+                      << "active MoE routes: " << engine.active_topk()
+                      << " / " << qwen35::kTopK << '\n'
                       << "RAM budget: "
                       << double(budget) / double(1ull << 30) << " GiB\n"
                       << "expert slots device/RAM: ";

@@ -51,10 +51,29 @@ if ($LASTEXITCODE -ne 0) { throw 'XTLLM C++ compilation failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Qwen3.8 C++ compilation failed' }
 
 & $Compiler -std=c++17 -O2 -Wall -Wextra -DNOMINMAX -static `
+    -DOVLLM_QWEN38_Q3_EXPERTS -I $VulkanInclude `
+    (Join-Path $Project 'src\qwen38_flash_next.cpp') `
+    -o (Join-Path $Build 'xtllm-qwen38-flash-next-q3.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Qwen3.8 Q3 C++ compilation failed' }
+
+& $Compiler -std=c++17 -O2 -Wall -Wextra -DNOMINMAX -static `
+    -DOVLLM_QWEN38_Q3_EXPERTS -I $VulkanInclude `
+    (Join-Path $Project 'src\qwen38_mtp.cpp') `
+    -o (Join-Path $Build 'xtllm-qwen38-flash-next-mtp.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Qwen3.8 MTP C++ compilation failed' }
+
+& $Compiler -std=c++17 -O2 -Wall -Wextra -DNOMINMAX -static `
     -DXTLLM_QWEN3_CODER_NEXT -I $VulkanInclude `
     (Join-Path $Project 'src\m16_qwen35.cpp') `
     -o (Join-Path $Build 'xtllm-qwen3-coder-next.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Qwen3-Coder-Next C++ compilation failed' }
+
+& $Compiler -std=c++17 -O2 -Wall -Wextra -DNOMINMAX -static `
+    -DXTLLM_QWEN3_CODER_NEXT -DXTLLM_QWEN3_CODER_NEXT_Q3 `
+    -I $VulkanInclude `
+    (Join-Path $Project 'src\m16_qwen35.cpp') `
+    -o (Join-Path $Build 'xtllm-qwen3-coder-next-q3.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Qwen3-Coder-Next Q3 C++ compilation failed' }
 
 & $Compiler -std=c++17 -O2 -Wall -Wextra -DNOMINMAX -static `
     -I $VulkanInclude `
@@ -62,4 +81,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Qwen3-Coder-Next C++ compilation failed' }
     -o (Join-Path $Build 'xtllm-longcat-flash-lite.exe')
 if ($LASTEXITCODE -ne 0) { throw 'LongCat C++ compilation failed' }
 
-Write-Host "Built XTLLM, three specialized backends, and $($Shaders.Count) shaders in $Build"
+& $Compiler -std=c++17 -O2 -Wall -Wextra -DNOMINMAX -static `
+    -DXTLLM_LONGCAT_DENSE_OUT_Q4 -I $VulkanInclude `
+    (Join-Path $Project 'src\longcat_flash_lite.cpp') `
+    -o (Join-Path $Build 'xtllm-longcat-flash-lite-hybrid.exe')
+if ($LASTEXITCODE -ne 0) { throw 'LongCat hybrid C++ compilation failed' }
+
+Write-Host "Built XTLLM, seven specialized backends, and $($Shaders.Count) shaders in $Build"

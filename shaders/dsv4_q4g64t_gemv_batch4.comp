@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer A{uint v[];}a;
+layout(set=0,binding=1,std430) readonly buffer W{uint v[];}w;
+layout(set=0,binding=2,std430) readonly buffer S{uint v[];}s;
+layout(set=0,binding=3,std430) writeonly buffer O{float v[];}o;
+layout(push_constant) uniform P{uint rows;uint inner;uint a_stride;uint o_stride;}p;
+uint sx(uint n){uint b=(n&15u)|((n&240u)<<4u)|((n&3840u)<<8u)|((n&61440u)<<12u);uint z=b&0x08080808u;return b|(z<<1u)|(z<<2u)|(z<<3u)|(z<<4u);}
+int dq(uint x,uint a0,uint a1){return dotPacked4x8EXT(int(a0),int(sx(x&65535u)))+dotPacked4x8EXT(int(a1),int(sx(x>>16u)));}
+float bf(uint i){uint x=s.v[i>>1u];return uintBitsToFloat(((x>>((i&1u)*16u))&65535u)<<16u);}
+void main(){
+ uint lane=gl_LocalInvocationID.x,frag=lane&1u,lg=lane>>1u,first=gl_WorkGroupID.x*2u;
+ uint groups=(p.inner+63u)/64u,words=groups*8u,packed=(p.inner+3u)/4u;
+ float sum[8];for(uint i=0u;i<8u;++i)sum[i]=0.0;
+ for(uint g=lg;g<groups;g+=32u){uint wi=frag*4u,aw=g*16u+wi*2u;
+  uint av[4][8];
+  for(uint b=0u;b<4u;++b)for(uint j=0u;j<8u;++j)av[b][j]=aw+j<packed?a.v[b*p.a_stride+aw+j]:0u;
+  for(uint r=0u;r<2u;++r){uint row=first+r;if(row>=p.rows)continue;uint base=row*words+wi*groups+g;uint ww[4]=uint[4](w.v[base],w.v[base+groups],w.v[base+2u*groups],w.v[base+3u*groups]);float ws=bf(row*groups+g);
+   for(uint b=0u;b<4u;++b){int d=dq(ww[0],av[b][0],av[b][1])+dq(ww[1],av[b][2],av[b][3])+dq(ww[2],av[b][4],av[b][5])+dq(ww[3],av[b][6],av[b][7]);float as=uintBitsToFloat(a.v[b*p.a_stride+packed+(g>>1u)]);sum[b*2u+r]+=float(d)*as*ws;}
+  }
+ }
+ for(uint i=0u;i<8u;++i)sum[i]=subgroupAdd(sum[i]);
+ if(lane==0u)for(uint b=0u;b<4u;++b)for(uint r=0u;r<2u;++r){uint row=first+r;if(row<p.rows)o.v[b*p.o_stride+row]=sum[b*2u+r];}
+}
