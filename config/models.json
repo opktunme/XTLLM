@@ -243,6 +243,7 @@
         "ram_env": "LONGCAT_RAM_GIB",
         "slots_env": "LONGCAT_DEVICE_SLOTS_PER_LAYER",
         "prewarm_env": "LONGCAT_FILL_RAM_CACHE",
+        "context_tokens_env": "LONGCAT_CONTEXT_TOKENS",
         "clear_env_prefixes": ["LONGCAT_"],
         "default_ram_gib": 24.0,
         "default_slots": 96

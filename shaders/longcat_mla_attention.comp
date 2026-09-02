@@ -10,31 +10,27 @@ layout(push_constant)uniform P{uint block;uint position;uint max_context;uint un
 
 const uint HEADS=32u,QSTRIDE=192u,CSTRIDE=320u;
 const float ATTENTION_SCALE=0.15781141573;
-shared float scores[256];
-
 void main(){
     uint lane=gl_LocalInvocationID.x,h=gl_WorkGroupID.x;
     if(h>=HEADS)return;
     uint count=p.position+1u;
     float mx=-3.402823466e+38;
+    float den=0.0;
+    float sum0=0.0;
+    float sum1=0.0;
     for(uint t=0u;t<count;++t){
         uint base=(p.block*p.max_context+t)*HEADS*CSTRIDE+h*CSTRIDE;
         float dot=0.0;
         for(uint d=lane;d<192u;d+=64u)dot+=q.v[h*QSTRIDE+d]*cache.v[base+d];
         dot=subgroupAdd(dot)*ATTENTION_SCALE;
-        if(lane==0u)scores[t]=dot;
-        mx=max(mx,dot);
+        float next_mx=max(mx,dot);
+        float previous_scale=exp(mx-next_mx);
+        float token_scale=exp(dot-next_mx);
+        den=den*previous_scale+token_scale;
+        sum0=sum0*previous_scale+token_scale*cache.v[base+192u+lane];
+        sum1=sum1*previous_scale+token_scale*cache.v[base+256u+lane];
+        mx=next_mx;
     }
-    mx=subgroupMax(mx);
-    barrier();
-    float den=0.0;
-    for(uint t=0u;t<count;++t)den+=exp(scores[t]-mx);
-    for(uint d=lane;d<128u;d+=64u){
-        float s=0.0;
-        for(uint t=0u;t<count;++t){
-            uint base=(p.block*p.max_context+t)*HEADS*CSTRIDE+h*CSTRIDE;
-            s+=exp(scores[t]-mx)/den*cache.v[base+192u+d];
-        }
-        ctx.v[h*128u+d]=s;
-    }
+    ctx.v[h*128u+lane]=sum0/den;
+    ctx.v[h*128u+64u+lane]=sum1/den;
 }

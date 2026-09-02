@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Removed LongCat's compiled 256-token context ceiling. Its finite Vulkan
+  executor now allocates K/V and RoPE state from prompt plus generation, with
+  an optional `--context-tokens` reserve bounded by available device memory.
 - Added named `reference`, `full`, and warned research-only `fast`
   inference profiles for Qwen3.8 Flash Next, Qwen3-Coder-Next, and LongCat.
 - Integrated Qwen3.8 Q3 experts and strict MTP verification, Qwen Coder Next

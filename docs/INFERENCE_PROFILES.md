@@ -41,10 +41,12 @@ reference containers; selecting one profile does not overwrite another.
 | Qwen3-Coder-Next | Q4 experts, 10/10 routes | Q3 experts, 10/10 routes | Q3 experts, 5/10 routes |
 | LongCat Flash Lite | Q4 experts plus Q8 shared/dense, 12/12 routes | selective-Q4 dense/output plus Q8 attention core, 12/12 routes | same selective-Q4 layout, 7/12 routes |
 
-The validated short-context capacities are 2,048 total tokens for Qwen3.8 and
-Qwen3-Coder-Next, and 256 total tokens for the current LongCat executor. The
-quality and speed tests below used ordinary prompts within those caps; they are
-not long-context benchmarks.
+The validated short-context capacities remain 2,048 total tokens for Qwen3.8
+and Qwen3-Coder-Next. LongCat has no compiled token ceiling: it sizes Vulkan
+K/V state from the tokenized prompt plus requested generation, or accepts an
+explicit larger reserve through `--context-tokens N`. Its practical limit is
+available VRAM. The quality and speed tests below used ordinary prompts and
+119 timed output transitions; they are not long-context benchmarks.
 
 ## Paired quality and speed results
 

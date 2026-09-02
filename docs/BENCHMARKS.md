@@ -60,6 +60,10 @@ The final merged-binary revalidation used the same fixed speed prompt and
 three clean processes per profile. Qwen3.8 timed 127 output transitions per
 run and LongCat timed 119. These are the release-headline values:
 
+The 119-transition LongCat run is the fixed benchmark length, not an executor
+limit. LongCat now sizes context at runtime and can execute beyond 256 total
+positions when the resulting device-local K/V allocation fits in VRAM.
+
 | Model | Reference runs (tok/s) | Full runs (tok/s) | Three-run average |
 |---|---|---|---:|
 | Qwen3.8 Flash Next | 6.40 / 6.40 / 6.38 | 8.49 / 8.46 / 8.51 accepted | **6.39 reference / 8.49 full** |

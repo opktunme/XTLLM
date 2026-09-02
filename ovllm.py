@@ -349,12 +349,20 @@ def standalone_settings(model: dict[str, Any], profile: dict[str, Any],
                         args: argparse.Namespace) -> dict[str, str]:
     spec = model["standalone"]
     if getattr(args, "context_gib", None) is not None or \
-            getattr(args, "context_tokens", None) is not None or \
             getattr(args, "long_mode", "auto") not in (None, "auto"):
         raise UserError(
             f"{model['name']} currently exposes its validated short-context path only; "
-            "context and long-mode overrides are not available yet."
+            "context-gib and long-mode overrides are not available."
         )
+    context_tokens = getattr(args, "context_tokens", None)
+    context_env = spec.get("context_tokens_env")
+    if context_tokens is not None:
+        if not context_env:
+            raise UserError(
+                f"{model['name']} does not expose a context-token override yet."
+            )
+        if context_tokens <= 0:
+            raise UserError("--context-tokens must be positive")
     result = {
         spec["ram_env"]: str(getattr(args, "ram_gib", None) or
                              profile.get("default_ram_gib", spec["default_ram_gib"])),
@@ -367,6 +375,8 @@ def standalone_settings(model: dict[str, Any], profile: dict[str, Any],
     if no_think and not getattr(args, "think", False):
         result[no_think] = "1"
     result.update(profile.get("env", {}))
+    if context_tokens is not None:
+        result[context_env] = str(context_tokens)
     return result
 
 
@@ -410,7 +420,14 @@ def command_plan(args: argparse.Namespace) -> int:
         if profile.get("measured_tok_s"):
             print(f"Measured decode: {profile['measured_tok_s']:.2f} tok/s on the validation system")
         print_profile_warning(profile)
-        print("Context: validated short-context backend")
+        context_env = model["standalone"].get("context_tokens_env")
+        if context_env:
+            requested = settings.get(context_env)
+            detail = f"explicit {requested}-token capacity" if requested else \
+                "runtime-sized from prompt plus generation"
+            print(f"Context: {detail}; bounded by available Vulkan memory")
+        else:
+            print("Context: validated short-context backend")
         return 0
     command = [str(find_engine(model)), *engine_options(args), "--plan", str(runtime)]
     print(f"> {format_command(command)}", flush=True)

@@ -304,6 +304,14 @@ The launcher rejects a requested RAM + context allocation that leaves less than
 Capacity is not the same as utilized context: a short chat remains fast even
 when a large maximum window is reserved.
 
+LongCat has no compiled 256-token executor limit. By default it allocates its
+Vulkan K/V state for the actual tokenized prompt plus requested generation.
+Use `--context-tokens N` to reserve a larger LongCat window explicitly. Its
+current MLA cache is device-local and costs about 1.094 MiB per token, so the
+practical ceiling depends on live VRAM after model weights, expert slots,
+workspace, and display/driver headroom. An excessive request fails cleanly at
+allocation; it does not create an unbounded shader or alter TDR settings.
+
 ## Architecture notes
 
 - **Qwen3.5/3.6:** hybrid Gated DeltaNet + full attention; only full-attention

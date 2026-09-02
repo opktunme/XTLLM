@@ -69,6 +69,36 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(
             full["env"]["LONGCAT_SHARED_MODEL"], "model-hybrid-q4g64.ovs")
 
+    def test_longcat_context_override_reaches_native_runtime(self):
+        model = ovllm.find_model("longcat")
+        _, full = ovllm.select_profile(model, "full")
+        environment, settings = ovllm.standalone_environment(
+            model, full, runtime_args(context_tokens=4096))
+        self.assertEqual(settings["LONGCAT_CONTEXT_TOKENS"], "4096")
+        self.assertEqual(environment["LONGCAT_CONTEXT_TOKENS"], "4096")
+
+    def test_other_standalone_context_override_remains_rejected(self):
+        model = ovllm.find_model("qwen38")
+        _, full = ovllm.select_profile(model, "full")
+        with self.assertRaises(ovllm.UserError):
+            ovllm.standalone_settings(
+                model, full, runtime_args(context_tokens=4096))
+
+    def test_longcat_context_override_must_be_positive(self):
+        model = ovllm.find_model("longcat")
+        _, full = ovllm.select_profile(model, "full")
+        with self.assertRaises(ovllm.UserError):
+            ovllm.standalone_settings(
+                model, full, runtime_args(context_tokens=0))
+
+    def test_longcat_source_has_no_compiled_256_token_context_cap(self):
+        source = (ROOT / "src" / "longcat_flash_lite.cpp").read_text(
+            encoding="utf-8")
+        shader = (ROOT / "shaders" / "longcat_mla_attention.comp").read_text(
+            encoding="utf-8")
+        self.assertNotIn("CTX=256", source)
+        self.assertNotIn("scores[256]", shader)
+
     def test_fast_profiles_carry_quality_warnings(self):
         for key in ("qwen38", "qwencoder", "longcat"):
             model = ovllm.find_model(key)
