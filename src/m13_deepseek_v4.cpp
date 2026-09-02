@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "expert_acquisition_trace.hpp"
+#include "xtllm_chat.hpp"
 
 // DeepSeek-V4-Flash (0731) main-model executor.  This file deliberately starts
 // from the low-level Vulkan substrate rather than the shape-specialized GPT-OSS
@@ -929,6 +930,14 @@ public:
     std::vector<uint32_t> chat_prompt(const std::string& user_text,
                                       bool thinking = false,
                                       const std::string& system_text = {}) const {
+        std::filesystem::path transcript_path;
+        if (xtllm_chat::referenced_path(user_text, transcript_path))
+            return xtllm_chat::render_deepseek(
+                xtllm_chat::read(transcript_path),
+                [this](const std::string& value) { return encode_text(value); },
+                header_.bos, header_.eos, header_.user, header_.assistant,
+                header_.think, header_.end_think, thinking,
+                header_.vocabulary == 128896, system_text);
         std::vector<uint32_t> result;
         result.push_back(header_.bos);
         if (header_.vocabulary == 128896) {

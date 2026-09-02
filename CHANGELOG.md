@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed localhost multi-turn chat formatting. The shared UI now passes a
+  structured transcript to native model tokenizers, which apply real
+  model-specific role tokens instead of flattening history into `User:` text.
 - Removed LongCat's compiled 256-token context ceiling. Its finite Vulkan
   executor now allocates K/V and RoPE state from prompt plus generation, with
   an optional `--context-tokens` reserve bounded by available device memory.

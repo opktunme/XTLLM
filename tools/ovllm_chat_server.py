@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import webbrowser
@@ -33,6 +35,20 @@ function add(role,text,metrics=''){const box=document.createElement('div');box.c
 async function submit(){const text=prompt.value.trim();if(!text||send.disabled)return;history.push({role:'user',content:text});add('user',text);prompt.value='';send.disabled=true;status.className='status';status.textContent='Running the Vulkan model…';try{const res=await fetch('/api/chat',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({messages:history,max_tokens:+document.querySelector('#tokens').value})});const data=await res.json();if(!res.ok)throw new Error(data.error||'Request failed');history.push({role:'assistant',content:data.response});add('assistant',data.response,data.metrics||'');status.textContent='Ready'}catch(e){status.className='status error';status.textContent=e.message}finally{send.disabled=false;prompt.focus()}}
 send.onclick=submit;prompt.onkeydown=e=>{if(e.key==='Enter'&&e.ctrlKey){e.preventDefault();submit()}};document.querySelector('#clear').onclick=()=>{history=[];chat.innerHTML='';status.textContent='Conversation cleared';prompt.focus()};prompt.focus();</script></body></html>"""
 
+CHAT_MAGIC = b"XTCHAT1\0"
+CHAT_REFERENCE_PREFIX = "@XTLLM_CHAT_FILE:"
+
+
+def write_chat_transcript(path: Path, messages: list[tuple[str, str]]) -> None:
+    with path.open("wb") as output:
+        output.write(CHAT_MAGIC)
+        output.write(struct.pack("<I", len(messages)))
+        for role, content in messages:
+            encoded = content.encode("utf-8")
+            output.write(struct.pack("<BI", 1 if role == "user" else 2,
+                                     len(encoded)))
+            output.write(encoded)
+
 
 class State:
     def __init__(self, engine: Path, runtime: Path, model_name: str,
@@ -49,21 +65,20 @@ class State:
         self.lock = threading.Lock()
 
     @staticmethod
-    def conversation_prompt(messages: list[dict]) -> str:
+    def conversation_messages(messages: list[dict]) -> list[tuple[str, str]]:
         clean: list[tuple[str, str]] = []
-        for item in messages[-8:]:
+        # Requests end with a user turn, so retain an odd number of turns to
+        # preserve complete user/assistant pairs and a leading user boundary.
+        for item in messages[-9:]:
             role, content = item.get("role"), item.get("content")
             if role in ("user", "assistant") and isinstance(content, str):
                 clean.append((role, content[:24000]))
         if not clean or clean[-1][0] != "user":
             raise ValueError("A user message is required")
-        if len(clean) == 1:
-            return clean[0][1]
-        parts = ["Continue this conversation. Answer only the final user message, using prior turns as context."]
-        for role, content in clean:
-            parts.append(f"\n\n{role.title()}: {content}")
-        parts.append("\n\nAssistant:")
-        return "".join(parts)[-120000:]
+        if any(role != ("user" if index % 2 == 0 else "assistant")
+               for index, (role, _) in enumerate(clean)):
+            raise ValueError("Conversation roles must alternate from user")
+        return clean
 
     @staticmethod
     def generated_text(output: str) -> str:
@@ -79,12 +94,8 @@ class State:
         return output[start:min(endings)].strip()
 
     def infer(self, messages: list[dict], requested_tokens: int) -> dict[str, str]:
-        prompt = self.conversation_prompt(messages)
+        transcript = self.conversation_messages(messages)
         tokens = max(8, min(int(requested_tokens or self.default_tokens), 512))
-        command = ([str(self.engine), str(self.runtime), prompt, str(tokens)]
-                   if self.standalone else
-                   [str(self.engine), *self.engine_options, "--tokens", str(tokens),
-                    str(self.runtime), prompt])
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("QWEN_", "QWEN36_", "QWEN38_",
                                               "LONGCAT_", "NEMOTRON3_", "DSV4_"))}
@@ -92,12 +103,26 @@ class State:
         temporary = self.runtime.parent / "tmp"
         temporary.mkdir(exist_ok=True)
         environment["TEMP"] = environment["TMP"] = str(temporary)
-        with self.lock:
-            completed = subprocess.run(
-                command, cwd=str(self.engine.parent), env=environment,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                encoding="utf-8", errors="replace", timeout=self.timeout,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        environment["XTLLM_STRUCTURED_CHAT"] = "1"
+        handle, transcript_name = tempfile.mkstemp(
+            prefix="xtllm-chat-", suffix=".bin", dir=temporary)
+        os.close(handle)
+        transcript_path = Path(transcript_name)
+        write_chat_transcript(transcript_path, transcript)
+        prompt = CHAT_REFERENCE_PREFIX + str(transcript_path)
+        command = ([str(self.engine), str(self.runtime), prompt, str(tokens)]
+                   if self.standalone else
+                   [str(self.engine), *self.engine_options, "--tokens", str(tokens),
+                    str(self.runtime), prompt])
+        try:
+            with self.lock:
+                completed = subprocess.run(
+                    command, cwd=str(self.engine.parent), env=environment,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    encoding="utf-8", errors="replace", timeout=self.timeout,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        finally:
+            transcript_path.unlink(missing_ok=True)
         if completed.returncode:
             raise RuntimeError(completed.stdout[-4000:].strip() or
                                f"inference exited with code {completed.returncode}")

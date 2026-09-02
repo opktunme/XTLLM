@@ -11,6 +11,11 @@ import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import tempfile
+
+from ovllm_chat_server import (CHAT_REFERENCE_PREFIX,
+                               State as CanonicalChatState,
+                               write_chat_transcript)
 
 
 PAGE = r"""<!doctype html>
@@ -61,67 +66,57 @@ class State:
         self.timeout = timeout
         self.lock = threading.Lock()
 
-    @staticmethod
-    def conversation_prompt(messages: list[dict]) -> str:
-        clean: list[tuple[str, str]] = []
-        for item in messages[-8:]:
-            role = item.get("role")
-            content = item.get("content")
-            if role in ("user", "assistant") and isinstance(content, str):
-                clean.append((role, content[:12000]))
-        if not clean:
-            raise ValueError("A user message is required")
-        if len(clean) == 1 and clean[0][0] == "user":
-            return clean[0][1]
-        lines = [
-            "Continue this conversation. Answer only the final user message, using prior turns as context."
-        ]
-        for role, content in clean:
-            lines.append(f"\n{role.title()}: {content}")
-        lines.append("\nAssistant:")
-        prompt = "".join(lines)
-        # The native runtime has a 2048-token short-context cap. Keep the most
-        # recent text when a browser conversation grows unusually large.
-        return prompt[-16000:]
+    conversation_messages = staticmethod(CanonicalChatState.conversation_messages)
 
     def infer(self, messages: list[dict], max_tokens: int, thinking: bool) -> dict:
-        prompt = self.conversation_prompt(messages)
+        transcript = self.conversation_messages(messages)
         max_tokens = max(8, min(int(max_tokens), 512))
         env = os.environ.copy()
         env["QWEN_RAM_GIB"] = "16"
         env["QWEN_PROGRESSIVE_EXPERTS"] = "1"
         env["TEMP"] = str(self.runtime.parents[2] / "tmp")
         env["TMP"] = env["TEMP"]
+        Path(env["TEMP"]).mkdir(exist_ok=True)
+        env["XTLLM_STRUCTURED_CHAT"] = "1"
         if thinking:
             env.pop("QWEN_NO_THINK", None)
         else:
             env["QWEN_NO_THINK"] = "1"
-        with self.lock:
-            completed = None
-            selected_slots = 0
-            # A browser and Windows compositor consume a variable amount of
-            # VRAM.  Use the fastest comfortable profile first, then retry
-            # only a clean initialization OOM at progressively safer sizes.
-            for slots in (29, 28, 26, 24, 17, 12, 8):
-                env["QWEN_DEVICE_SLOTS_PER_LAYER"] = str(slots)
-                command = [str(self.executable), str(self.runtime), prompt,
-                           str(max_tokens)]
-                completed = subprocess.run(
-                    command,
-                    cwd=str(self.executable.parents[1]),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=self.timeout,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-                selected_slots = slots
-                if completed.returncode == 0:
-                    break
-                if "device-local Vulkan allocation failed" not in completed.stdout:
-                    break
+        handle, transcript_name = tempfile.mkstemp(
+            prefix="xtllm-chat-", suffix=".bin", dir=env["TEMP"])
+        os.close(handle)
+        transcript_path = Path(transcript_name)
+        write_chat_transcript(transcript_path, transcript)
+        prompt = CHAT_REFERENCE_PREFIX + str(transcript_path)
+        try:
+            with self.lock:
+                completed = None
+                selected_slots = 0
+                # A browser and Windows compositor consume a variable amount of
+                # VRAM.  Use the fastest comfortable profile first, then retry
+                # only a clean initialization OOM at progressively safer sizes.
+                for slots in (29, 28, 26, 24, 17, 12, 8):
+                    env["QWEN_DEVICE_SLOTS_PER_LAYER"] = str(slots)
+                    command = [str(self.executable), str(self.runtime), prompt,
+                               str(max_tokens)]
+                    completed = subprocess.run(
+                        command,
+                        cwd=str(self.executable.parents[1]),
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=self.timeout,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    selected_slots = slots
+                    if completed.returncode == 0:
+                        break
+                    if "device-local Vulkan allocation failed" not in completed.stdout:
+                        break
+        finally:
+            transcript_path.unlink(missing_ok=True)
         assert completed is not None
         output = completed.stdout
         if completed.returncode:

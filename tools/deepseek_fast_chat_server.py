@@ -11,6 +11,11 @@ import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import tempfile
+
+from ovllm_chat_server import (CHAT_REFERENCE_PREFIX,
+                               State as CanonicalChatState,
+                               write_chat_transcript)
 
 
 PAGE = r"""<!doctype html>
@@ -49,43 +54,39 @@ class State:
         self.timeout = timeout
         self.lock = threading.Lock()
 
-    @staticmethod
-    def conversation_prompt(messages: list[dict]) -> str:
-        clean: list[tuple[str, str]] = []
-        for item in messages[-8:]:
-            role, content = item.get("role"), item.get("content")
-            if role in ("user", "assistant") and isinstance(content, str):
-                clean.append((role, content[:24000]))
-        if not clean:
-            raise ValueError("A user message is required")
-        if len(clean) == 1 and clean[0][0] == "user":
-            return clean[0][1]
-        parts = ["Continue this conversation. Answer only the final user message, using prior turns as context."]
-        for role, content in clean:
-            parts.append(f"\n\n{role.title()}: {content}")
-        parts.append("\n\nAssistant:")
-        return "".join(parts)[-120000:]
+    conversation_messages = staticmethod(CanonicalChatState.conversation_messages)
 
     def infer(self, messages: list[dict], max_tokens: int) -> dict:
-        prompt = self.conversation_prompt(messages)
+        transcript = self.conversation_messages(messages)
         max_tokens = max(8, min(int(max_tokens), 256))
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("DSV4_")}
         root = self.executable.parents[1]
         env["TEMP"] = str(root / "tmp")
         env["TMP"] = env["TEMP"]
+        Path(env["TEMP"]).mkdir(exist_ok=True)
+        env["XTLLM_STRUCTURED_CHAT"] = "1"
+        handle, transcript_name = tempfile.mkstemp(
+            prefix="xtllm-chat-", suffix=".bin", dir=env["TEMP"])
+        os.close(handle)
+        transcript_path = Path(transcript_name)
+        write_chat_transcript(transcript_path, transcript)
+        prompt = CHAT_REFERENCE_PREFIX + str(transcript_path)
         command = [
             str(self.executable), "--ram-gib", "16", "--context-gib", "7",
             "--context-tokens", "1048576", "--long-mode", "fast",
             str(self.runtime), prompt, str(max_tokens),
         ]
-        with self.lock:
-            completed = subprocess.run(
-                command, cwd=str(root), env=env, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
-                timeout=self.timeout,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+        try:
+            with self.lock:
+                completed = subprocess.run(
+                    command, cwd=str(root), env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
+                    timeout=self.timeout,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+        finally:
+            transcript_path.unlink(missing_ok=True)
         output = completed.stdout
         if completed.returncode:
             raise RuntimeError(output[-3000:].strip() or

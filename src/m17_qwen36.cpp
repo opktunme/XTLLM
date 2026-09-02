@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <unordered_map>
+#include "xtllm_chat.hpp"
 
 // Qwen3.6-35B-A3B text-only executor.  This is deliberately separate from
 // the retained DeepSeek and Step-3.7 executors.  It reuses their finite Vulkan
@@ -351,6 +352,13 @@ public:
     std::vector<uint32_t> chat_prompt(const std::string& user_text,
                                       bool thinking = true,
                                       const std::string& system_text = {}) const {
+        std::filesystem::path transcript_path;
+        if (xtllm_chat::referenced_path(user_text, transcript_path))
+            return xtllm_chat::render_im(
+                xtllm_chat::read(transcript_path),
+                [this](const std::string& value) { return encode_text(value); },
+                kImStart, kImEnd, kThink, kEndThink, thinking,
+                xtllm_chat::Suffix::qwen_think, false, system_text);
         std::vector<uint32_t> result;
         const auto text = [&](const std::string& value) {
             const std::vector<uint32_t> encoded = encode_text(value);

@@ -304,6 +304,12 @@ The launcher rejects a requested RAM + context allocation that leaves less than
 Capacity is not the same as utilized context: a short chat remains fast even
 when a large maximum window is reserved.
 
+The localhost UI passes conversation turns through a length-delimited binary
+transcript. Native model tokenizers—not the browser or a generic text wrapper—
+insert the checkpoint's real user/assistant control tokens for every turn.
+This preserves role boundaries and arbitrary UTF-8 content without exposing
+model assets through an HTTP service or relying on literal `User:` labels.
+
 LongCat has no compiled 256-token executor limit. By default it allocates its
 Vulkan K/V state for the actual tokenized prompt plus requested generation.
 Use `--context-tokens N` to reserve a larger LongCat window explicitly. Its
