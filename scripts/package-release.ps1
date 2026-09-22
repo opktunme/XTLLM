@@ -61,6 +61,7 @@ Copy-Item -LiteralPath (Join-Path $Root 'tools\ovllm_chat_server.py') -Destinati
 Copy-Item -LiteralPath (Join-Path $Root 'tools\xtllm_chat_server.py') -Destination (Join-Path $Stage 'tools')
 Copy-Item -Path (Join-Path $Root 'tools\convert_*.py') -Destination (Join-Path $Stage 'tools')
 Copy-Item -Path (Join-Path $Root 'docs\*.md') -Destination (Join-Path $Stage 'docs')
+Copy-Item -LiteralPath (Join-Path $Root 'docs\licenses') -Destination (Join-Path $Stage 'docs') -Recurse
 Copy-Item -LiteralPath (Join-Path $Root 'docs\assets') -Destination (Join-Path $Stage 'docs') -Recurse
 
 Compress-Archive -LiteralPath $Stage -DestinationPath $Zip -CompressionLevel Optimal

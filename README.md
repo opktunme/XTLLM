@@ -9,15 +9,23 @@
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-22c55e">
 </p>
 
-## 20 tok/s LongCat and 8.49 accepted tok/s Qwen3.8 on an RX 6700 XT
+## 20 tok/s LongCat and 14.18 tok/s Qwen3.8 on an RX 6700 XT
 
-Fresh three-run averages from the merged Windows/Vulkan binaries reached
-**20.00 tok/s for LongCat Flash Lite Sparse** with all 12 routes and
-**8.49 accepted tok/s for Qwen3.8 Flash Next** with all 10 routes and strict
-MTP verification. LongCat's full profile trades 2.8 objective-quality points
-for its speedup in the deeper paired study; Qwen3.8 full tied its reference
-profile at 37/40. See [Measured performance](#measured-performance) for the
-reference paths, formats, memory use, methodology, and research-only profiles.
+**Qwen3.8 Flash Next now reaches 14.18 generated tok/s** with Q4 experts,
+all 10 routes, and no speculative decoding: **90% faster** than a matched
+7.45 tok/s rerun of the original path. Four short-context trials used a
+72 GiB RAM ceiling (~60.02 GiB actual host use) and ~10.56 GiB peak VRAM on
+an 88 GB system. Greedy tokens matched the original on chat, reasoning, and
+code checks; this is not a broad quality evaluation or a long-context result.
+The subsequent pre-push check measured **12.45 tok/s in main versus 12.46 in
+the retained fork** (7.41 for the reference fallback), with matching tokens:
+no merge-specific slowdown, but
+expert acquisition was slower in that session. Both measurements are reported.
+
+**LongCat Flash Lite Sparse retains its 20.00 tok/s three-run result**, with
+all 12 routes. Its full profile trades 2.8 objective-quality points for speed
+in the deeper paired study. See [Measured performance](#measured-performance)
+for the formats, memory settings, methodology, and research-only profiles.
 
 XTLLM (eXpert-Tier LLM) is an experimental, text-only Vulkan inference engine for
 running very large mixture-of-experts models on consumer AMD GPUs. It keeps a
@@ -81,18 +89,19 @@ AMD, Radeon, and RDNA are trademarks of Advanced Micro Devices, Inc.
 | DeepSeek-V4-Flash-0731 | 284B | ~13B | 6 / 256 | Q4G64T experts/shared; Q8 global/router | ~141.2 GiB |
 | Qwen3.6-35B-A3B | ~35B | ~3B | 8 / 256 | Q4G64T; Q8 embed/head/router | 17.62 GiB |
 | NVIDIA Nemotron-3-Nano-30B-A3B | ~30B | ~3B | 6 / 128 | native E2M1 NVFP4/BF16-K16; Q8 global | 18.61 GiB |
-| Qwen3.8-Flash-Next-FP8 | ~125B | ~6B | 10 / 512 | Reference Q4 experts; full Q3 experts + strict MTP; official FP8 PLE | 110.54 / 157.3 GiB |
+| Qwen3.8-Flash-Next-FP8 | ~125B | ~6B | 10 / 512 | Q4G64T experts/shared, Q8 globals, official FP8 PLE; full has optimized Vulkan execution | 110.54 GiB; legacy Q3/MTP sidecars increase this to 157.3 GiB |
 | Qwen3-Coder-Next-FP8 | 79.67B | ~3.3B | 10 / 512 | Reference Q4 or full-route Q3 experts; Q4 shared; Q8 global | 39.73 / 69.1 GiB |
 | LongCat-Flash-Lite-Sparse | ~68.5B | ~3B | 12 / 256 physical + 128 identity | Q4 experts; reference Q8 shared or full selective-Q4 shared; BF16 n-gram rows | 78.35 / 80.7 GiB |
 
-Vision namespaces are not executed. Qwen3.8 full/fast executes the checkpoint's
-text MTP block; the reference profile retains original greedy decoding.
+Vision namespaces are not executed. Qwen3.8 reference/full use ordinary greedy
+decoding. The previous Q3/MTP configuration remains available as `legacy-mtp`;
+`fast` retains its explicitly warned, quality-rejected relaxed MTP experiment.
 
 ## Measured performance
 
 RX 6700 XT 12GB, Ryzen 5 3600, NVMe SSD, Windows 10, and prewarmed budgeted
-caches. The base backends use Q4/NVFP4-class formats; the newer profile table
-explicitly labels its full-route Q3 expert paths. Short-context figures use 23
+caches. The base backends use Q4/NVFP4-class formats; Qwen Coder Next's full
+profile uses Q3 experts as labeled above. The following base-model figures use 23
 timed token transitions. “System RAM” is a profile; the engine budget leaves OS
 headroom.
 
@@ -108,13 +117,22 @@ These are fixed-workload decode measurements, not installed-RAM projections:
 
 | Model | Reference | Full (default) | Fast experiment | Quality conclusion |
 |---|---:|---:|---:|---|
-| Qwen3.8-Flash-Next-FP8 | 6.39 tok/s | **8.49 accepted tok/s** | 17.22 tok/s | Full tied reference at 37/40; fast fell to 9/40 strict |
+| Qwen3.8-Flash-Next-FP8 | 7.45 tok/s matched rerun (6.39 historical) | **14.18 tok/s, Q4, no MTP** | 17.22 tok/s, historical Q3/relaxed MTP | New full matched baseline token IDs on three prompts; historical fast fell to 9/40 strict |
 | Qwen3-Coder-Next-FP8 | 11.17 tok/s | **12.01 tok/s** | 23.17 tok/s | Full scored 19/20 vs 18/20 reference; fast was 0/20 strict |
 | LongCat-Flash-Lite-Sparse | 15.46 tok/s | **20.00 tok/s** | 22.78 tok/s | Deep test found full -2.8 points vs reference and fast -5.0 more vs full |
 
-The reference/full values above are the final three-run averages from the
-merged release binaries. Qwen3.8 generated 127 timed transitions per run;
-LongCat generated 119. LongCat full was also run for a longer ten-run study
+Qwen3.8's new full result averages four trials (14.03–14.28 tok/s), with 127
+timed transitions per run; its matched reference averages two trials. Both used
+72 GiB configured RAM and 62 VRAM expert slots/layer. All 24,576 experts fit in
+RAM, so expert SSD reads were zero; FP8 PLE still reads selected rows from SSD.
+The context allocation was 2,048 tokens; the speed prompt used only 38 tokens
+plus 128 generated tokens. Startup, prewarming and prompt prefill are excluded.
+This merge does **not** add larger KV/context capacity. See the
+[Qwen3.8 optimization results and reproduction commands](docs/DWARFSTAR_PORT.md).
+
+The other reference/full release figures retain their previous three-run
+measurements. LongCat generated 119 timed transitions per run and was also
+run for a longer ten-run study
 after the host upgrade to 88 GB RAM: steady trials 2–10 averaged
 **21.28 tok/s** (median 21.29). It retained all 3,584 expert records in
 16.7344 GiB with zero expert SSD reads, so RAM beyond the 24 GiB model budget
@@ -168,6 +186,10 @@ The release ZIP includes the native engine, compiled Vulkan shaders, model
 converters, and launcher. You do **not** need CMake, a C++ compiler, or the
 Vulkan SDK unless you want to modify XTLLM.
 
+The new Qwen3.8 Q4 optimization is on `main`; older release ZIPs still contain
+the previous backend. Until the next tagged release, use a current Windows
+build artifact or [build from source](#build-from-source) for this path.
+
 Prerequisites: Windows 10 22H2/11, an AMD Vulkan 1.3 driver, Python 3.11+, and
 an NVMe drive large enough for both the official checkpoint and converted
 runtime. Model weights are downloaded from their official publisher and are
@@ -208,7 +230,7 @@ expert conversion can be run again safely.
 | `nemotron` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4` | 40 GiB |
 | `qwen122` | `Qwen/Qwen3.5-122B-A10B` | 300 GiB |
 | `deepseek` | `deepseek-ai/DeepSeek-V4-Flash-0731` | 450 GiB |
-| `qwen38` | `Qwen/Qwen3.8-Flash-Next-FP8` | 336 GiB for full; 290 GiB reference-only |
+| `qwen38` | `Qwen/Qwen3.8-Flash-Next-FP8` | 290 GiB for reference/full; 336 GiB with legacy Q3/MTP sidecars |
 | `qwencoder` | `Qwen/Qwen3-Coder-Next-FP8` | 149 GiB for full; 120 GiB reference-only |
 | `longcat` | `meituan-longcat/LongCat-Flash-Lite-Sparse` | 216 GiB for full; 214 GiB reference-only |
 
@@ -288,6 +310,7 @@ and memory APIs. The exact dependencies and bounded porting checklist are in
 --profile reference  retained comparison implementation where available
 --profile full       validated optimized full-route implementation (default)
 --profile fast       warned research-only reduced/relaxed implementation
+--profile legacy-mtp preserved previous Qwen3.8 Q3/strict-MTP implementation
 --ram-gib N          expert/model host-memory budget
 --context-gib N      separately accounted host K/V budget
 --context-tokens N   exact context capacity (overrides context-gib sizing)
@@ -328,7 +351,8 @@ allocation; it does not create an unbounded shader or alter TDR settings.
   path; the generic Qwen cache layout is not forced onto it.
 - **Qwen3.8 Flash Next:** four-stream gated residuals, hybrid DeltaNet/full
   attention, Top-10/512 MoE, bounded reads from the official FP8 PLE table,
-  additive Q3 expert containers, and strict MTP verification in full mode.
+  parallel routing, fused HC boundaries, and Q4 expert-reuse prompt prefill.
+  Original Q3/MTP sidecars remain available through `legacy-mtp`.
 - **Qwen3-Coder-Next:** its own 48-layer hybrid layout and Top-10/512 expert
   cache, with retained Q4 reference and full-route Q3 expert paths.
 - **LongCat Flash Lite Sparse:** dual attention/dense sublayers, MLA, physical
@@ -366,3 +390,5 @@ traffic accounting—not only a kernel microbenchmark.
 
 Engine source: Apache-2.0. Model checkpoints and converted weights retain their
 original licenses and are not redistributed by this repository.
+The Qwen3.8 optimization port credits DwarfStar's scheduling/fusion ideas;
+its [MIT notice](docs/licenses/DwarfStar-MIT.txt) is included.

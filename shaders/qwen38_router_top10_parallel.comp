@@ -1,0 +1,43 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// DwarfStar-inspired lane-owned top-k, reimplemented for XTLLM's route ABI.
+// Keep XTLLM's raw-logit ranking, lower-ID tie break, and serial selected-logit
+// softmax (DwarfStar's full-softmax-first rounding is deliberately NOT used).
+// See docs/DWARFSTAR_PORT.md for upstream attribution and validation status.
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Logits { float v[]; } logits;
+layout(set=0,binding=1,std430) writeonly buffer Routes { uint v[]; } routes;
+layout(push_constant) uniform P { uint experts; uint top_k; uint u0; uint u1; } p;
+const float LOWEST = -3.402823466e+38;
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    float mine[8];
+    for (uint j=0u; j<8u; ++j) {
+        uint e=lane+64u*j;
+        mine[j]=e<min(p.experts,512u) ? logits.v[e] : LOWEST;
+    }
+    float selected[10]; uint ids[10];
+    uint k=min(p.top_k,10u);
+    for (uint r=0u; r<k; ++r) {
+        float best=LOWEST; uint id=0xffffffffu;
+        for (uint j=0u; j<8u; ++j) {
+            if (mine[j]>best) { best=mine[j]; id=lane+64u*j; }
+        }
+        float winner=subgroupMax(best);
+        uint chosen=subgroupMin(best==winner ? id : 0xffffffffu);
+        // Match the baseline's sentinel behavior if there is no finite winner.
+        chosen=chosen==0xffffffffu ? 0u : chosen;
+        selected[r]=winner; ids[r]=chosen;
+        for (uint j=0u; j<8u; ++j)
+            if (lane+64u*j==chosen) mine[j]=LOWEST;
+    }
+    if (lane==0u) {
+        float maximum=k>0u ? selected[0] : 0.0, total=0.0;
+        for (uint r=0u; r<k; ++r) total+=exp(selected[r]-maximum);
+        for (uint r=0u; r<10u; ++r) {
+            routes.v[r]=r<k ? ids[r] : 0u;
+            routes.v[16u+r]=floatBitsToUint(r<k ? exp(selected[r]-maximum)/total : 0.0);
+        }
+    }
+}

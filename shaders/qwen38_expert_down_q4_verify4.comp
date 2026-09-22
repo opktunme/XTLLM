@@ -1,0 +1,43 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+// Q4 K=640 down tail stays on the packed-dot path, shared across four rows.
+layout(local_size_x=32) in;
+layout(set=0,binding=0,std430) readonly buffer Act { uint v[]; } a;
+layout(set=0,binding=1,std430) readonly buffer Expert { uint v[]; } ex;
+layout(set=0,binding=2,std430) readonly buffer Meta { uint v[]; } meta;
+layout(set=0,binding=3,std430) writeonly buffer Out { float v[]; } o;
+layout(push_constant) uniform P { uint unique; uint scale_base; uint u0; uint u1; } p;
+const uint DIM=2560u,EDIM=640u,TOP=10u,GROUPS=10u,WORDS=8u,DS=1740800u,DW=1792000u;
+uint sn(uint n) { uint b=(n&15u)|((n&240u)<<4u)|((n&3840u)<<8u)|((n&61440u)<<12u); uint s=b&0x08080808u; return b|(s<<1u)|(s<<2u)|(s<<3u)|(s<<4u); }
+int dq(uint w,uint a0,uint a1) { return dotPacked4x8EXT(int(a0),int(sn(w&65535u)))+dotPacked4x8EXT(int(a1),int(sn(w>>16u))); }
+float bf(uint i) { uint h=(ex.v[(DS>>2u)+(i>>1u)]>>((i&1u)*16u))&65535u; return uintBitsToFloat(h<<16u); }
+void main() {
+    uint lane=gl_LocalInvocationID.x,frag=lane&1u,group=lane>>1u,first=gl_WorkGroupID.x*2u;
+    uint ranks[4]; float sum[8];
+    for (uint b=0u;b<4u;++b) ranks[b]=meta.v[p.unique*8u+b];
+    for (uint i=0u;i<8u;++i) sum[i]=0.0;
+    if (group<GROUPS) for (uint rr=0u;rr<2u;++rr) {
+        uint row=first+rr;
+        if (row>=DIM) continue;
+        uint base=(DW>>2u)+row*(GROUPS*WORDS)+frag*4u*GROUPS+group;
+        uint w[4]; for (uint j=0u;j<4u;++j) w[j]=ex.v[base+j*GROUPS];
+        float ws=bf(row*GROUPS+group);
+        for (uint b=0u;b<4u;++b) {
+            if (ranks[b]>=TOP) continue;
+            uint idx=b*TOP+ranks[b],ab=idx*(EDIM/4u)+group*16u+frag*8u;
+            int d=dq(w[0],a.v[ab],a.v[ab+1u]);
+            for (uint j=1u;j<4u;++j) d+=dq(w[j],a.v[ab+j*2u],a.v[ab+j*2u+1u]);
+            float as=uintBitsToFloat(a.v[p.scale_base+idx*5u+(group>>1u)]);
+            sum[b*2u+rr]+=float(d)*as*ws;
+        }
+    }
+    for (uint i=0u;i<8u;++i) sum[i]=subgroupAdd(sum[i]);
+    if (lane==0u) for (uint b=0u;b<4u;++b) if (ranks[b]<TOP) {
+        float rw=uintBitsToFloat(meta.v[p.unique*8u+4u+b]);
+        for (uint rr=0u;rr<2u;++rr) {
+            uint row=first+rr;
+            if (row<DIM) o.v[(b*TOP+ranks[b])*DIM+row]=sum[b*2u+rr]*rw;
+        }
+    }
+}

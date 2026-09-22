@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Promoted the validated Qwen3.8 Q4 speed path to `full`: lane-parallel Top-10
+  routing, fused HC/Q8 packing and MoE/residual updates, and four-token prompt
+  prefill with shared expert acquisition. All 10 routes and weight formats
+  are preserved; ordinary output decoding does not use MTP.
+- Measured 14.18 generated tok/s across four RX 6700 XT trials versus 7.45
+  tok/s for the matched original path (+90%). The 88 GB machine used a 72 GiB
+  budget, ~60.02 GiB actual host RAM and ~10.56 GiB peak VRAM. Tokens matched
+  the original on three sanity prompts; this is a short-context result.
+- Pre-push integration recheck: merged main averaged 12.45 tok/s versus 12.46
+  for the unchanged fork in the same session (within 0.1%), with identical
+  tokens. Acquisition was slower than in the earlier 14.18 trials; both
+  sets of measurements are documented rather than assuming constant speed.
+- Preserved Qwen3.8's original `reference`, and moved its previous Q3/strict
+  MTP `full` profile to `legacy-mtp`. Default setup now needs only the existing
+  Q4/FP8 containers; it does not create Q3 or draft sidecars. Other models'
+  configurations and kernels are unchanged.
+- Retained DwarfStar attribution/MIT notice, added profile-isolation tests,
+  and included specialized backends and third-party notices in CI artifacts.
+  Larger RAM-backed KV/context support is not part of this merge.
+
 - Fixed localhost multi-turn chat formatting. The shared UI now passes a
   structured transcript to native model tokenizers, which apply real
   model-specific role tokens instead of flattening history into `User:` text.

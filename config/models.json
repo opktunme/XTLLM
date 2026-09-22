@@ -23,6 +23,18 @@
           "measured_tok_s": 6.39
         },
         "full": {
+          "label": "Optimized Q4 full route, grouped prefill, no MTP (10/10 routes)",
+          "backend": "xtllm-qwen38-flash-next.exe",
+          "runtime_gib": 110.6,
+          "default_ram_gib": 53.0,
+          "default_slots": 62,
+          "measured_tok_s": 14.18,
+          "env": {
+            "QWEN38_DWARFSTAR": "1",
+            "QWEN38_DWARF_PREFILL4": "1"
+          }
+        },
+        "legacy-mtp": {
           "label": "Q3 full route + strict MTP verification (10/10 routes)",
           "backend": "xtllm-qwen38-flash-next-mtp.exe",
           "runtime_gib": 157.3,
@@ -96,13 +108,13 @@
         },
         {
           "script": "convert_qwen38_experts_q3.py",
-          "profiles": ["full", "fast"],
+          "profiles": ["legacy-mtp", "fast"],
           "when_missing": ["experts-q3g64.ovx"],
           "args": ["--source", "{runtime}/experts-q4g64.ovx", "--output", "{runtime}/experts-q3g64.ovx"]
         },
         {
           "script": "convert_qwen38_mtp.py",
-          "profiles": ["full", "fast"],
+          "profiles": ["legacy-mtp", "fast"],
           "when_missing": ["mtp-q4g64.ovs", "mtp-experts-q3g64.ovx"],
           "args": ["--source", "{checkpoint}", "--output", "{runtime}"]
         }

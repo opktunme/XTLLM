@@ -1,0 +1,53 @@
+#version 450
+#extension GL_EXT_integer_dot_product : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+// One expert's packed Q4 words feed up to four token rows before eviction.
+// Lane/group accumulation follows XTLLM's scalar Q4 kernel; only weight loads
+// are shared. Exact K=2560, no new quantization and no dropped expert rows.
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Act { uint v[]; } a;
+layout(set=0,binding=1,std430) readonly buffer Expert { uint v[]; } ex;
+layout(set=0,binding=2,std430) readonly buffer Meta { uint v[]; } meta;
+layout(set=0,binding=3,std430) writeonly buffer Out { float v[]; } o;
+layout(push_constant) uniform P { uint unique; uint a_stride; uint u0; uint u1; } p;
+const uint DIM=2560u,EDIM=640u,TOP=10u,GROUPS=40u,WORDS=8u;
+const uint GS=0u,GW=51200u,US=870400u,UW=921600u;
+uint sn(uint n) { uint b=(n&15u)|((n&240u)<<4u)|((n&3840u)<<8u)|((n&61440u)<<12u); uint s=b&0x08080808u; return b|(s<<1u)|(s<<2u)|(s<<3u)|(s<<4u); }
+int dq(uint w,uint a0,uint a1) { return dotPacked4x8EXT(int(a0),int(sn(w&65535u)))+dotPacked4x8EXT(int(a1),int(sn(w>>16u))); }
+float bf(uint off,uint i) { uint h=(ex.v[(off>>2u)+(i>>1u)]>>((i&1u)*16u))&65535u; return uintBitsToFloat(h<<16u); }
+void main() {
+    uint lane=gl_LocalInvocationID.x,frag=lane&1u,lg=lane>>1u,first=gl_WorkGroupID.x*2u;
+    uint ranks[4]; float g[8],u[8];
+    for (uint b=0u;b<4u;++b) ranks[b]=meta.v[p.unique*8u+b];
+    for (uint i=0u;i<8u;++i) { g[i]=0.0; u[i]=0.0; }
+    for (uint group=lg;group<GROUPS;group+=32u) {
+        for (uint rr=0u;rr<2u;++rr) {
+            uint row=first+rr;
+            if (row>=EDIM) continue;
+            uint bg=(GW>>2u)+row*(GROUPS*WORDS)+frag*4u*GROUPS+group;
+            uint bu=(UW>>2u)+row*(GROUPS*WORDS)+frag*4u*GROUPS+group;
+            uint wg[4],wu[4];
+            for (uint w=0u;w<4u;++w) { wg[w]=ex.v[bg+w*GROUPS]; wu[w]=ex.v[bu+w*GROUPS]; }
+            float gs=bf(GS,row*GROUPS+group),us=bf(US,row*GROUPS+group);
+            for (uint b=0u;b<4u;++b) {
+                if (ranks[b]>=TOP) continue;
+                uint ab=b*p.a_stride+group*16u+frag*8u;
+                int dg=dq(wg[0],a.v[ab],a.v[ab+1u]);
+                int du=dq(wu[0],a.v[ab],a.v[ab+1u]);
+                for (uint w=1u;w<4u;++w) {
+                    dg+=dq(wg[w],a.v[ab+w*2u],a.v[ab+w*2u+1u]);
+                    du+=dq(wu[w],a.v[ab+w*2u],a.v[ab+w*2u+1u]);
+                }
+                float as=uintBitsToFloat(a.v[b*p.a_stride+DIM/4u+(group>>1u)]);
+                g[b*2u+rr]+=float(dg)*gs*as;
+                u[b*2u+rr]+=float(du)*us*as;
+            }
+        }
+    }
+    for (uint i=0u;i<8u;++i) { g[i]=subgroupAdd(g[i]); u[i]=subgroupAdd(u[i]); }
+    if (lane==0u) for (uint b=0u;b<4u;++b) if (ranks[b]<TOP)
+        for (uint rr=0u;rr<2u;++rr) {
+            uint row=first+rr;
+            if (row<EDIM) { float x=g[b*2u+rr]; o.v[(b*TOP+ranks[b])*EDIM+row]=(x/(1.0+exp(-x)))*u[b*2u+rr]; }
+        }
+}

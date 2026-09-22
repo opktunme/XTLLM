@@ -47,12 +47,54 @@ class ProfileTests(unittest.TestCase):
         with patch.dict(os.environ, {
             "QWEN38_RELAXED_DRAFTS": "3",
             "QWEN38_VERIFY4_ACTIVE_TOPK": "7",
+            "QWEN38_PARALLEL_HOST_COPY": "1",
+            "QWEN38_VERIFY4_EXPERIMENT": "1",
         }, clear=False):
             environment, settings = ovllm.standalone_environment(
                 model, full, runtime_args())
         self.assertNotIn("QWEN38_RELAXED_DRAFTS", environment)
-        self.assertEqual(settings["QWEN38_VERIFY4_ACTIVE_TOPK"], "10")
-        self.assertEqual(settings["QWEN38_DEVICE_SLOTS_PER_LAYER"], "72")
+        self.assertNotIn("QWEN38_VERIFY4_ACTIVE_TOPK", environment)
+        self.assertNotIn("QWEN38_VERIFY4_EXPERIMENT", environment)
+        self.assertNotIn("QWEN38_PARALLEL_HOST_COPY", environment)
+        self.assertEqual(settings["QWEN38_DEVICE_SLOTS_PER_LAYER"], "62")
+        self.assertEqual(settings["QWEN38_DWARFSTAR"], "1")
+        self.assertEqual(settings["QWEN38_DWARF_PREFILL4"], "1")
+        self.assertEqual(full["backend"], "xtllm-qwen38-flash-next.exe")
+
+    def test_qwen_full_needs_no_q3_or_mtp_conversion(self):
+        model = ovllm.find_model("qwen38")
+        _, full = ovllm.select_profile(model, "full")
+        requirements = ovllm.profile_requirements(model, full)
+        self.assertFalse(any("q3" in item["path"] or "mtp" in item["path"]
+                             for item in requirements))
+        steps = [step["script"] for step in model["conversion"]
+                 if "profiles" not in step or "full" in step["profiles"]]
+        self.assertEqual(steps, ["convert_qwen38.py"])
+
+    def test_qwen_reference_and_legacy_mtp_remain_isolated(self):
+        model = ovllm.find_model("qwen38")
+        for name in ("reference", "legacy-mtp", "fast"):
+            _, profile = ovllm.select_profile(model, name)
+            with patch.dict(os.environ, {"QWEN38_DWARFSTAR": "1",
+                                         "QWEN38_DWARF_PREFILL4": "1"}):
+                environment, _ = ovllm.standalone_environment(
+                    model, profile, runtime_args())
+            self.assertNotIn("QWEN38_DWARFSTAR", environment)
+            self.assertNotIn("QWEN38_DWARF_PREFILL4", environment)
+        legacy = model["profiles"]["legacy-mtp"]
+        self.assertEqual(legacy["env"]["QWEN38_VERIFY4_ACTIVE_TOPK"], "10")
+        self.assertEqual(legacy["default_slots"], 72)
+
+    def test_qwen_full_respects_memory_overrides_and_small_cache(self):
+        model = ovllm.find_model("qwen38")
+        _, full = ovllm.select_profile(model, "full")
+        for slots in (10, 39, 40, 62):
+            settings = ovllm.standalone_settings(
+                model, full, runtime_args(ram_gib=24, device_slots=slots))
+            self.assertEqual(settings["QWEN38_RAM_GIB"], "24")
+            self.assertEqual(settings["QWEN38_DEVICE_SLOTS_PER_LAYER"], str(slots))
+            self.assertEqual(settings["QWEN38_DWARFSTAR"], "1")
+            self.assertEqual("QWEN38_DWARF_PREFILL4" in settings, slots >= 40)
 
     def test_longcat_profiles_keep_distinct_shared_containers(self):
         model = ovllm.find_model("longcat")

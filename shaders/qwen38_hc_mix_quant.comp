@@ -1,0 +1,43 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+// Fuse the existing HC mix and its immediately following Q8 activation pack.
+// One required wave64 covers one 128-value quantization group. Keep the float
+// mixed output too: MTP's hidden-state consumers still require it.
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Normed { float v[]; } normed;
+layout(set=0,binding=1,std430) readonly buffer MixLogits { float v[]; } mix_logits;
+layout(set=0,binding=2,std430) writeonly buffer Mixed { float v[]; } mixed;
+layout(set=0,binding=3,std430) writeonly buffer Packed { uint v[]; } packed;
+layout(push_constant) uniform P { uint dimension; uint branches; uint u0; uint u1; } p;
+shared float values[128];
+void main() {
+    uint lane=gl_LocalInvocationID.x, group=gl_WorkGroupID.x, begin=group*128u;
+    float maximum=0.0;
+    for (uint step=0u; step<2u; ++step) {
+        uint offset=lane+step*64u, i=begin+offset;
+        float s=0.0;
+        if (i<p.dimension) {
+            for (uint b=0u; b<p.branches; ++b) {
+                uint x=b*p.dimension+i;
+                s+=normed.v[x]/(1.0+exp(-mix_logits.v[x]));
+            }
+            s/=float(p.branches);
+            mixed.v[i]=s;
+        }
+        values[offset]=s;
+        maximum=max(maximum,abs(s));
+    }
+    maximum=subgroupMax(maximum);
+    float scale=maximum>0.0 ? maximum/127.0 : 1.0;
+    if (lane==0u) packed.v[p.dimension/4u+group]=floatBitsToUint(scale);
+    barrier();
+    if (lane<32u && begin+lane*4u<p.dimension) {
+        uint word=0u;
+        for (uint c=0u; c<4u; ++c) {
+            int q=int(round(clamp(values[lane*4u+c]/scale,-127.0,127.0)));
+            word|=(uint(q)&255u)<<(8u*c);
+        }
+        packed.v[begin/4u+lane]=word;
+    }
+}

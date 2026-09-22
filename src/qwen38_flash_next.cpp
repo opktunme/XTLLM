@@ -104,6 +104,14 @@ static uint32_t float_bits(float value) {
     return bits;
 }
 
+// Native switches default OFF; the launcher's Q4 full profile enables them.
+// Keep reference/Q3 paths isolated and preserve authoritative routing.
+static bool dwarf_option(const char* name, bool inherit = true) {
+    const char* value = std::getenv(name);
+    if (!value && inherit) value = std::getenv("QWEN38_DWARFSTAR");
+    return value && std::strcmp(value, "0") != 0;
+}
+
 struct TensorDevice {
     DescriptorRange data{}, auxiliary{};
     TensorFormat format = TensorFormat::f32;
@@ -1438,6 +1446,9 @@ public:
                 result.unique_indices[row][rank] = unique;
             }
         }
+        // Check before mutating cache entries. Never silently truncate a union.
+        if (result.unique_count > layer_slots)
+            throw std::runtime_error("Qwen four-row expert union exceeds device slots");
         std::vector<bool> reserved(layer_slots);
         for (uint32_t unique = 0; unique < result.unique_count; ++unique) {
             const uint32_t expert = result.unique_experts[unique];
@@ -1549,6 +1560,11 @@ public:
     }
     void copy(const std::vector<Task>& tasks) {
         if (tasks.empty()) return;
+        if (!enabled_) {
+            for (const Task& task : tasks)
+                std::memcpy(task.destination, task.source, task.bytes);
+            return;
+        }
         if (tasks.size() == 1) {
             std::memcpy(tasks[0].destination, tasks[0].source,
                         tasks[0].bytes);
@@ -1625,6 +1641,7 @@ struct Pipelines {
     VkPipeline group_rms{}, hc_act{}, hc_mix{}, hc_inject{};
     VkPipeline group_rms_batch4{}, hc_mix_batch4{}, hc_inject_batch4{};
     VkPipeline ple_gate{}, ple_conv_add{}, repeat_hc{};
+    VkPipeline hc_mix_quant{}, reduce_hc{};
 };
 
 class Kernels {
@@ -1651,7 +1668,12 @@ public:
         pipelines_.q4_batch4 = load("dsv4_q4g64t_gemv_batch4");
         pipelines_.q8_batch4 = load("dsv4_q8_gemv_batch4");
         pipelines_.swiglu = load("step37_swiglu");
-        pipelines_.router = load("qwen38_router_top10");
+        pipelines_.router = load(dwarf_option("QWEN38_DWARF_ROUTER")
+            ? "qwen38_router_top10_parallel" : "qwen38_router_top10");
+        if (dwarf_option("QWEN38_DWARF_HC_QUANT"))
+            pipelines_.hc_mix_quant = load("qwen38_hc_mix_quant");
+        if (dwarf_option("QWEN38_DWARF_REDUCE_HC"))
+            pipelines_.reduce_hc = load("qwen38_reduce_hc");
 #ifdef OVLLM_QWEN38_Q3_EXPERTS
         pipelines_.expert_gate = load("qwen38_expert_gate_up_q3");
         pipelines_.expert_down = load32("qwen38_expert_down_q3");
@@ -1670,6 +1692,8 @@ public:
             load("qwen38_expert_gate_up_q4_arena_batch");
         pipelines_.expert_down_batch =
             load32("qwen38_expert_down_q4_arena_batch");
+        pipelines_.expert_gate_verify4 = load("qwen38_expert_gate_up_q4_verify4");
+        pipelines_.expert_down_verify4 = load32("qwen38_expert_down_q4_verify4");
 #endif
         pipelines_.reduce = load("qwen38_reduce_shared_gate");
 #ifdef OVLLM_LONG_CONTEXT_FORK
@@ -1797,10 +1821,30 @@ public:
             std::getenv("QWEN38_Q4_ONE_LANE") != nullptr;
         q4_one_lane_mid_ =
             std::getenv("QWEN38_Q4_ONE_LANE_MID") != nullptr;
+        dwarf_hc_quant_ = dwarf_option("QWEN38_DWARF_HC_QUANT");
+        dwarf_reduce_hc_ = dwarf_option("QWEN38_DWARF_REDUCE_HC");
+        dwarf_prefill4_ = dwarf_option("QWEN38_DWARF_PREFILL4", false);
+        const bool dwarf_active = dwarf_hc_quant_ || dwarf_reduce_hc_ ||
+            dwarf_prefill4_ || dwarf_option("QWEN38_DWARF_ROUTER");
+#ifdef OVLLM_QWEN38_Q3_EXPERTS
+        if (dwarf_active)
+            throw std::runtime_error("DwarfStar transplant requires the Q4 build, not Q3");
+#endif
+        if (dwarf_active && parallel_host_copy_)
+            throw std::runtime_error("DwarfStar experiment excludes the inherited spin-copy pool");
+        if (dwarf_prefill4_) {
+            for (uint32_t layer = 0; layer < kLayers; ++layer)
+                if (device_cache_.layer_slots(layer) < kVerifyBatch * kTopK)
+                    throw std::runtime_error("Q4 grouped prefill needs >=40 expert slots in every layer");
+        }
         verify4_enabled_ =
-            std::getenv("QWEN38_VERIFY4_EXPERIMENT") != nullptr;
-        verify4_batch_enabled_ = verify4_enabled_ &&
-            std::getenv("QWEN38_VERIFY4_BATCH_Q4") != nullptr;
+            std::getenv("QWEN38_VERIFY4_EXPERIMENT") != nullptr || dwarf_prefill4_;
+        verify4_batch_enabled_ = dwarf_prefill4_ || (verify4_enabled_ &&
+            std::getenv("QWEN38_VERIFY4_BATCH_Q4") != nullptr);
+        // Prompt tokens are authoritative inputs: no rejection snapshots or
+        // their ~340 MiB VRAM/copy cost are needed for prefill-only batching.
+        prefill4_only_ = dwarf_prefill4_ &&
+            std::getenv("QWEN38_VERIFY4_EXPERIMENT") == nullptr;
         verify_logits_host_enabled_ = verify4_batch_enabled_ &&
             std::getenv("QWEN38_RELAXED_REPEAT_GUARD") != nullptr;
         if (const char* text = std::getenv("QWEN38_VERIFY4_ACTIVE_TOPK")) {
@@ -1809,6 +1853,16 @@ public:
                 throw std::runtime_error(
                     "QWEN38_VERIFY4_ACTIVE_TOPK must be between 1 and 10");
         }
+        if (dwarf_active && (verify_active_topk_ != kTopK ||
+            std::getenv("QWEN38_RELAXED_DRAFTS") ||
+            std::getenv("QWEN38_RELAXED_ACCEPT_ALL") || verify_logits_host_enabled_))
+            throw std::runtime_error("DwarfStar experiment requires all routes and strict verification");
+        if (dwarf_active)
+            std::cout << "Qwen3.8 optimized Vulkan path: router="
+                      << dwarf_option("QWEN38_DWARF_ROUTER")
+                      << " mix+quant=" << dwarf_hc_quant_
+                      << " reduce+HC=" << dwarf_reduce_hc_
+                      << " Q4 prefill4=" << dwarf_prefill4_ << '\n';
         if (progressive_experts_)
             progressive_compute_ = std::make_unique<
                 dsv4::experiment::FiniteQueueRing<12>>(
@@ -1849,7 +1903,24 @@ public:
 #endif
         uint32_t position = 0;
         uint32_t next = 0;
-        for (uint32_t token : prompt) next = run_token(token, position++);
+        const auto prefill_started = std::chrono::steady_clock::now();
+        while (position < prompt.size()) {
+            if (dwarf_prefill4_ && prompt.size() - position >= kVerifyBatch) {
+                std::array<uint32_t, kVerifyBatch> inputs{};
+                for (uint32_t row = 0; row < kVerifyBatch; ++row)
+                    inputs[row] = prompt[position + row];
+                next = verify4_experiment(inputs, position).back();
+                position += kVerifyBatch;
+            } else {
+                next = run_token(prompt[position], position);
+                ++position;
+            }
+        }
+        std::cout << (dwarf_prefill4_ ? "grouped" : "scalar")
+                  << " prefill tokens / wall s / unique expert records / occurrences: "
+                  << prompt.size() << " / "
+                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - prefill_started).count()
+                  << " / " << verify_unique_experts_ << " / " << verify_occurrences_ << '\n';
         if (std::getenv("QWEN38_FILL_RAM_CACHE")) {
             double fill_seconds = 0.0;
             const uint32_t filled =
@@ -1909,6 +1980,10 @@ public:
     uint64_t ram_bytes() const {
         return host_cache_.committed_bytes() +
                uint64_t(staging_.size()) * kExpertRecordBytes
+               + uint64_t(verify_staging_.size()) * kExpertRecordBytes
+               + verify_ple_host_.allocation_size + verify_logits_host_.allocation_size
+               + verify_tokens_.allocation_size + verify_routing_.allocation_size
+               + verify_expert_meta_.allocation_size
                + ple_host_.allocation_size + 8192
 #ifdef OVLLM_LONG_CONTEXT_FORK
                + kv_cache_.allocation_size
@@ -1974,8 +2049,14 @@ public:
             throw std::runtime_error("Qwen verify4 experiment is disabled");
         if (position + 3 >= kMaximumContext)
             throw std::runtime_error("Qwen verify4 context cap reached");
-        if (verify4_batch_enabled_)
-            return verify4_batch_experiment(tokens, position);
+        if (verify4_batch_enabled_) {
+            const auto started = std::chrono::steady_clock::now();
+            const auto result = verify4_batch_experiment(tokens, position);
+            verify_wall_seconds_ += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started).count();
+            ++verify_passes_;
+            return result;
+        }
         const bool trace = std::getenv("QWEN38_VERIFY4_TRACE") != nullptr;
         if (trace) std::cerr << "verify4 begin position " << position << '\n';
         auto* token_words = static_cast<uint32_t*>(verify_tokens_.mapped);
@@ -2237,7 +2318,7 @@ public:
     }
 
     void accept_verify4_experiment(uint32_t consumed) {
-        if (!verify4_enabled_ || consumed < 1 || consumed > 4)
+        if (!verify4_enabled_ || prefill4_only_ || consumed < 1 || consumed > 4)
             throw std::runtime_error("Invalid Qwen verify4 acceptance");
         const uint32_t row = consumed - 1;
         ple_lookup_.restore(verify_ple_states_[row]);
@@ -2271,6 +2352,8 @@ public:
 
     uint64_t verify_unique_experts() const { return verify_unique_experts_; }
     uint64_t verify_occurrences() const { return verify_occurrences_; }
+    uint64_t verify_passes() const { return verify_passes_; }
+    double verify_wall_seconds() const { return verify_wall_seconds_; }
     uint64_t verify_reused_occurrences() const {
         return verify_reused_occurrences_;
     }
@@ -2319,6 +2402,9 @@ public:
     void set_verify_active_topk(uint32_t active) {
         if (active < 1 || active > kTopK)
             throw std::runtime_error("Invalid Qwen verifier active top-k");
+        if (active != kTopK && (dwarf_hc_quant_ || dwarf_reduce_hc_ ||
+                dwarf_prefill4_ || dwarf_option("QWEN38_DWARF_ROUTER")))
+            throw std::runtime_error("DwarfStar candidate cannot reduce authoritative routes");
         verify_active_topk_ = active;
     }
 
@@ -2420,7 +2506,7 @@ private:
             }
             // Three snapshots cover the three rejection boundaries.  When
             // all four inputs are accepted the live state already is row 3.
-            for (uint32_t row = 0; row < 3; ++row) {
+            for (uint32_t row = 0; row < 3 && !prefill4_only_; ++row) {
                 verify_conv_snapshots_[row] = device(conv_state_.size);
                 verify_recurrent_snapshots_[row] = device(recurrent_state_.size);
                 verify_ple_snapshots_[row] = device(ple_state_.size);
@@ -2554,7 +2640,7 @@ private:
 
     struct HcSets {
         VkDescriptorSet norm{}, quant{}, down{}, inject{}, act{};
-        VkDescriptorSet low_quant{}, up{}, mix{}, apply{};
+        VkDescriptorSet low_quant{}, up{}, mix{}, apply{}, mix_quant{};
     };
 
     struct VerifyHcSets {
@@ -2710,6 +2796,15 @@ private:
         verify_batch_final_hc_ = build_verify_hc_sets("final_hc_", false);
         verify_batch_lm_head_set_ = q8_batch4_set(
             whole(verify_batch_quant_), lm_head, whole(verify_batch_logits_));
+        if (prefill4_only_) {
+            const uint64_t row = kVerifyBatch - 1;
+            prefill_last_lm_head_set_ = kernels_.set({
+                arena_range(verify_batch_quant_, row * kVerifyDimQuantU32 * 4,
+                            uint64_t(kVerifyDimQuantU32) * 4),
+                lm_head.data, lm_head.auxiliary,
+                arena_range(verify_batch_logits_, row * kVocabulary * 4,
+                            uint64_t(kVocabulary) * 4)});
+        }
 
         verify_batch_layers_.resize(kLayers);
         for (uint32_t layer = 0; layer < kLayers; ++layer) {
@@ -2900,6 +2995,9 @@ private:
         sets.up = q4_set(whole(hc_low_quant_), up, whole(hc_mix_weights_));
         sets.mix = kernels_.set({whole(hc_normed_), whole(hc_mix_weights_),
                                  whole(hidden_)});
+        if (dwarf_hc_quant_)
+            sets.mix_quant = kernels_.set({whole(hc_normed_), whole(hc_mix_weights_),
+                                           whole(hidden_), whole(quant_)});
         if (with_injection) {
             const TensorDevice injection = tensor(prefix + "inject",
                 TensorFormat::q4g64t, kHcCount, kHcDim);
@@ -2954,6 +3052,10 @@ private:
         }
         reduce_set_ = kernels_.set({whole(expert_outputs_), whole(shared_output_),
                                     whole(shared_expert_gate_), whole(block_output_)});
+        if (dwarf_reduce_hc_)
+            reduce_hc_set_ = kernels_.set({whole(expert_outputs_), whole(shared_output_),
+                whole(shared_expert_gate_), whole(hc_injection_), whole(hyper_),
+                whole(block_output_)});
         const DescriptorRange expert_addresses = arena_range(
             routing_, 16u * sizeof(uint32_t), kTopK * sizeof(uint64_t));
         expert_gate_batch_set_ = kernels_.set(
@@ -3272,7 +3374,7 @@ private:
                 kernels_.dispatch(command, kernels_.p().delta, sets.delta[row],
                                   &push, kLinearValueHeads);
                 compute_barrier(command);
-                if (row < 3) {
+                if (row < 3 && !prefill4_only_) {
                     verify_to_transfer(command);
                     const uint64_t linear = linear_index(layer);
                     const VkBufferCopy conv_copy{
@@ -3414,7 +3516,7 @@ private:
                         vkfn::CmdCopyBuffer(command, hyper_.handle,
                             verify_batch_hyper_.handle, 1,
                             &hyper_from_single);
-                        if (row < 3) {
+                        if (row < 3 && !prefill4_only_) {
                             const VkBufferCopy state_copy{0, 0, ple_state_.size};
                             vkfn::CmdCopyBuffer(command, ple_state_.handle,
                                 verify_ple_snapshots_[row].handle, 1,
@@ -3562,16 +3664,25 @@ private:
         signal = compute_.submit([&](VkCommandBuffer command) {
             record_verify_hc_start(command, verify_batch_final_hc_, false);
             Push push{kDim, 128, kDim / 4, kDim / 4};
-            for (uint32_t row = 0; row < kVerifyBatch; ++row)
+            // Prefill consumes known inputs. Only its final row needs logits;
+            // a speculative verifier still must evaluate every candidate row.
+            const uint32_t first_head = prefill4_only_ ? kVerifyBatch - 1 : 0;
+            for (uint32_t row = first_head; row < kVerifyBatch; ++row)
                 kernels_.dispatch(command, kernels_.p().quant,
                     verify_batch_final_quant_sets_[row], &push, kDim / 128);
             compute_barrier(command);
-            push = {kVocabulary, kDim, kVerifyDimQuantU32, kVocabulary};
-            kernels_.dispatch(command, kernels_.p().q8_batch4,
-                              verify_batch_lm_head_set_, &push,
-                              (kVocabulary + 3) / 4);
+            if (prefill4_only_) {
+                push = {kVocabulary, kDim, kDim / 4, 0};
+                kernels_.dispatch(command, kernels_.p().q8,
+                    prefill_last_lm_head_set_, &push, (kVocabulary + 7) / 8);
+            } else {
+                push = {kVocabulary, kDim, kVerifyDimQuantU32, kVocabulary};
+                kernels_.dispatch(command, kernels_.p().q8_batch4,
+                                  verify_batch_lm_head_set_, &push,
+                                  (kVocabulary + 3) / 4);
+            }
             compute_barrier(command);
-            for (uint32_t row = 0; row < kVerifyBatch; ++row) {
+            for (uint32_t row = first_head; row < kVerifyBatch; ++row) {
                 push = {kVocabulary, 256, 0, 0};
                 kernels_.dispatch(command, kernels_.p().argmax,
                     verify_batch_argmax_sets_[row], &push, 256);
@@ -3652,6 +3763,8 @@ private:
         pre_seconds_ = pre_submit_seconds_ = pre_wait_seconds_ = 0;
         acquisition_seconds_ = expert_seconds_ = 0;
         verify_unique_experts_ = verify_occurrences_ = 0;
+        verify_passes_ = 0;
+        verify_wall_seconds_ = 0;
         verify_reused_occurrences_ = 0;
     }
 
@@ -3916,9 +4029,11 @@ private:
         signal = compute_.submit([&](VkCommandBuffer command) {
             record_hc_start(command, final_hc_, false);
             Push push{kDim, 128, kDim / 4, kDim / 4};
-            kernels_.dispatch(command, kernels_.p().quant, final_quant_set_, &push,
-                              kDim / 128);
-            compute_barrier(command);
+            if (!dwarf_hc_quant_) {
+                kernels_.dispatch(command, kernels_.p().quant, final_quant_set_, &push,
+                                  kDim / 128);
+                compute_barrier(command);
+            }
             push = {kVocabulary, kDim, kDim / 4, 0};
             kernels_.dispatch(command, kernels_.p().q8, lm_head_set_, &push,
                               (kVocabulary + 7) / 8);
@@ -3966,8 +4081,10 @@ private:
                           kHcDim / 8);
         compute_barrier(command);
         push = {kDim, kHcCount, 0, 0};
-        kernels_.dispatch(command, kernels_.p().hc_mix, sets.mix, &push,
-                          (kDim + 63) / 64);
+        kernels_.dispatch(command,
+            dwarf_hc_quant_ ? kernels_.p().hc_mix_quant : kernels_.p().hc_mix,
+            dwarf_hc_quant_ ? sets.mix_quant : sets.mix, &push,
+            dwarf_hc_quant_ ? kDim / 128 : (kDim + 63) / 64);
         compute_barrier(command);
     }
 
@@ -4015,9 +4132,11 @@ private:
                           uint32_t position) {
         LayerSets& sets = layers_[layer];
         Push push{kDim, 128, kDim / 4, kDim / 4};
-        kernels_.dispatch(command, kernels_.p().quant, sets.hidden_quant, &push,
-                          kDim / 128);
-        compute_barrier(command);
+        if (!dwarf_hc_quant_) {
+            kernels_.dispatch(command, kernels_.p().quant, sets.hidden_quant, &push,
+                              kDim / 128);
+            compute_barrier(command);
+        }
 
         if (full_attention(layer)) {
             push = {12288, kDim, kDim / 4, 0};
@@ -4101,9 +4220,11 @@ private:
     void record_router(VkCommandBuffer command, uint32_t layer) {
         LayerSets& sets = layers_[layer];
         Push push{kDim, 128, kDim / 4, kDim / 4};
-        kernels_.dispatch(command, kernels_.p().quant, sets.hidden_quant, &push,
-                          kDim / 128);
-        compute_barrier(command);
+        if (!dwarf_hc_quant_) {
+            kernels_.dispatch(command, kernels_.p().quant, sets.hidden_quant, &push,
+                              kDim / 128);
+            compute_barrier(command);
+        }
         push = {kExperts, kDim, kDim / 4, 0};
         kernels_.dispatch(command, kernels_.p().q8, sets.router_gemv, &push,
                           kExperts / 8);
@@ -4178,6 +4299,10 @@ private:
             }
         }
         compute_barrier(command);
+        if (dwarf_reduce_hc_) {
+            record_fused_expert_finish(command);
+            return;
+        }
         push = {kDim, kTopK, 0, 0};
         kernels_.dispatch(command, kernels_.p().reduce, reduce_set_, &push,
                           kDim / 64);
@@ -4264,11 +4389,22 @@ private:
     }
 
     void record_expert_finish(VkCommandBuffer command, uint32_t layer) {
+        if (dwarf_reduce_hc_) {
+            record_fused_expert_finish(command);
+            return;
+        }
         const Push push{kDim, kTopK, 0, 0};
         kernels_.dispatch(command, kernels_.p().reduce, reduce_set_, &push,
                           kDim / 64);
         compute_barrier(command);
         record_hc_apply(command, layers_[layer].mlp_hc);
+    }
+
+    void record_fused_expert_finish(VkCommandBuffer command) {
+        const Push push{kDim, kTopK, kHcCount, float_bits(float(kHcCount))};
+        kernels_.dispatch(command, kernels_.p().reduce_hc, reduce_hc_set_, &push,
+                          kDim / 64);
+        compute_barrier(command);
     }
 
     void destroy_all() {
@@ -4395,13 +4531,13 @@ private:
     std::array<VkDescriptorSet, kVerifyBatch> verify_batch_repeat_sets_{};
     std::array<VkDescriptorSet, kVerifyBatch> verify_batch_final_quant_sets_{};
     std::array<VkDescriptorSet, kVerifyBatch> verify_batch_argmax_sets_{};
-    VkDescriptorSet verify_batch_lm_head_set_{};
+    VkDescriptorSet verify_batch_lm_head_set_{}, prefill_last_lm_head_set_{};
     VkDescriptorSet verify_batch_expert_quant_set_{};
     VerifyHcSets verify_batch_final_hc_{};
     std::vector<VerifyLayerSets> verify_batch_layers_;
     VkDescriptorSet lm_head_set_{}, argmax_set_{}, expert_quant_set_{};
     std::array<VkDescriptorSet, kTopK> expert_rank_quant_sets_{};
-    VkDescriptorSet reduce_set_{}, expert_gate_batch_set_{}, expert_down_batch_set_{};
+    VkDescriptorSet reduce_set_{}, reduce_hc_set_{}, expert_gate_batch_set_{}, expert_down_batch_set_{};
     bool batch_experts_ = false;
     bool progressive_experts_ = false;
     bool q4_wave32_mid_ = false;
@@ -4410,6 +4546,8 @@ private:
     bool parallel_host_copy_ = false;
     bool verify4_enabled_ = false;
     bool verify4_batch_enabled_ = false;
+    bool dwarf_hc_quant_ = false, dwarf_reduce_hc_ = false;
+    bool dwarf_prefill4_ = false, prefill4_only_ = false;
     uint32_t verify_active_topk_ = kTopK;
     bool verify_logits_host_enabled_ = false;
     ParallelCopyPool copy_pool_;
@@ -4428,6 +4566,8 @@ private:
     std::array<PleLookup::State, 4> verify_ple_states_{};
     uint64_t verify_unique_experts_ = 0;
     uint64_t verify_occurrences_ = 0;
+    uint64_t verify_passes_ = 0;
+    double verify_wall_seconds_ = 0;
     uint64_t verify_reused_occurrences_ = 0;
 };
 

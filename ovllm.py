@@ -375,6 +375,12 @@ def standalone_settings(model: dict[str, Any], profile: dict[str, Any],
     if no_think and not getattr(args, "think", False):
         result[no_think] = "1"
     result.update(profile.get("env", {}))
+    # Four-row Qwen3.8 prefill must hold the complete union of 4 x Top-10.
+    # Smaller explicit GPU caches retain the optimized scalar decode path.
+    if model["key"] == "qwen38" and \
+            result.get("QWEN38_DWARF_PREFILL4") == "1" and \
+            int(result[spec["slots_env"]]) < 40:
+        result.pop("QWEN38_DWARF_PREFILL4")
     if context_tokens is not None:
         result[context_env] = str(context_tokens)
     return result
@@ -478,7 +484,7 @@ def command_chat(args: argparse.Namespace) -> int:
 def add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-root", help="model storage root (or XTLLM_MODELS)")
     parser.add_argument("--profile",
-                        help="inference profile (reference, full, or fast where available)")
+                        help="inference profile (reference, full, fast, or legacy-mtp where available)")
     parser.add_argument("--ram-gib", type=float)
     parser.add_argument("--context-gib", type=float)
     parser.add_argument("--context-tokens", type=int)

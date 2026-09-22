@@ -45,7 +45,27 @@ them with this single short release check.
 These numbers are retained as the original Q4/Q8 backend baseline. They predate
 the additive Q3, MTP, selective-Q4, and named-profile integration.
 
-## Reference/full/fast profile validation
+## Qwen3.8 Q4 optimization validation — 2026-09-22
+
+The current `full` profile uses Q4 experts and no MTP. Four isolated trials
+averaged **14.18055 tok/s**, compared with **7.45123 tok/s** across two matched
+original-Q4 trials. Both used 72 GiB configured RAM and 62 VRAM slots/layer
+on the upgraded 88 GB host. The fixed speed prompt above is 38 tokens; 128
+output tokens yield 127 timed transitions. Initialization, prefill and
+prewarming are excluded. Actual peak host working set was ~60.02 GiB and
+observed dedicated VRAM ~10.56 GiB. Expert SSD reads were zero; PLE remained
+SSD-backed. Paired chat/reasoning/code output IDs matched, with 100 additional
+router fixtures; no broad quality or long-context claim follows from these
+checks. See [results and exact settings](DWARFSTAR_PORT.md).
+The later pre-push check measured 12.4873 / 12.4170 tok/s in main and 12.4645
+in the unchanged fork. Acquisition increased to about 30 ms/output in both;
+the current session did not reproduce 14.18, but found no merge-specific
+slowdown. Both result sets are retained in the linked measurement notes.
+
+## Historical reference/full/fast profile validation
+
+The Qwen3.8 "full" configuration below is now named `legacy-mtp`. Its results
+are retained for comparison, not attributed to the new Q4 default.
 
 The later paired evaluation keeps prompt forms, scoring, and cache settings
 matched within each model:

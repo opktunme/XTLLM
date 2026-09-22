@@ -1,6 +1,6 @@
 # Validated inference profiles
 
-XTLLM exposes three named inference profiles for Qwen3.8 Flash Next,
+XTLLM exposes named inference profiles for Qwen3.8 Flash Next,
 Qwen3-Coder-Next, and LongCat Flash Lite. The names describe the evaluation
 role, not one universal quantization:
 
@@ -9,6 +9,7 @@ role, not one universal quantization:
 | `reference` | Highest-fidelity retained implementation used as the comparison baseline |
 | `full` | Optimized implementation with every authoritative MoE route retained |
 | `fast` | Explicit research tradeoff that evaluates fewer routes or relaxes verification |
+| `legacy-mtp` | Qwen3.8 only: preserved previous Q3/strict-MTP full profile |
 
 `full` is the default for all three models. `fast` is never selected
 automatically and the launcher prints a quality warning when it is requested.
@@ -37,7 +38,7 @@ reference containers; selecting one profile does not overwrite another.
 
 | Model | Reference | Full | Fast |
 |---|---|---|---|
-| Qwen3.8 Flash Next | Q4 experts, original greedy, 10/10 routes | Q3 experts, strict MTP verification, 10/10 routes | Q3 experts, relaxed three-draft MTP, 7/10 verifier routes |
+| Qwen3.8 Flash Next | Q4 experts, original greedy, 10/10 routes | Q4 experts, parallel router/HC fusions/grouped prefill, 10/10 routes, no MTP | Q3 experts, relaxed three-draft MTP, 7/10 verifier routes |
 | Qwen3-Coder-Next | Q4 experts, 10/10 routes | Q3 experts, 10/10 routes | Q3 experts, 5/10 routes |
 | LongCat Flash Lite | Q4 experts plus Q8 shared/dense, 12/12 routes | selective-Q4 dense/output plus Q8 attention core, 12/12 routes | same selective-Q4 layout, 7/12 routes |
 
@@ -48,7 +49,26 @@ explicit larger reserve through `--context-tokens N`. Its practical limit is
 available VRAM. The quality and speed tests below used ordinary prompts and
 119 timed output transitions; they are not long-context benchmarks.
 
-## Paired quality and speed results
+## Current Qwen3.8 full profile (2026-09-22)
+
+The new Q4 `full` path measured **14.18 tok/s** across four trials, compared
+with **7.45 tok/s** for a matched two-trial original Q4 rerun. Configured RAM
+was 72 GiB (~60.02 GiB actual), with 62 device slots/layer and ~10.56 GiB peak
+VRAM on the 88 GB host. Tokens matched the original on three chat/reasoning/code
+prompts; this does not replace the historical 40-question evaluation below.
+No MTP or new quantization is enabled. Setup reuses the existing Q4/FP8 assets
+and no longer converts Q3/MTP sidecars for `full`.
+
+The former Q3 `full` profile is now named `legacy-mtp`, with its original
+settings preserved. Reference and the other models' profiles are unchanged.
+The default Qwen3.8 RAM ceiling remains 53 GiB; the headline was measured with
+the explicit `--ram-gib 72 --device-slots 62` overrides. Lower RAM budgets need
+their own measurements. See [implementation and reproduction](DWARFSTAR_PORT.md).
+
+## Historical paired quality and speed results
+
+In this section, Qwen3.8 "full" means today's `legacy-mtp`, not the new Q4
+default. These earlier evaluations are preserved, not relabeled as fresh tests.
 
 Hardware was an RX 6700 XT 12 GB with a Ryzen 5 3600 and NVMe storage. Decode
 throughput excludes initialization and prompt prefill.
@@ -74,7 +94,7 @@ detected in this paired form.
 Immediately before packaging the merged binaries, three clean repetitions of
 the fixed speed prompt averaged **6.39 reference / 8.49 accepted full tok/s**
 for Qwen3.8 and **15.46 reference / 20.00 full tok/s** for LongCat. These are
-the README release headlines. The paired table above remains here because its
+the earlier release headlines. The paired table above remains here because its
 speed and objective-quality results came from the same evaluation run.
 
 ## LongCat deep evaluation
